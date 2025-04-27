@@ -1,3 +1,20 @@
 {
-
+  "name": "doom-parser",
+  "version": "0.0.0",
+  "description": "Parser for Doom & Hexen WAD files.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seanmorris/doom-parser.git"
+  },
+  "author": "Sean Morris",
+  "bugs": {
+    "url": "https://github.com/seanmorris/doom-parser/issues"
+  },
+  "homepage": "https://github.com/seanmorris/doom-parser#readme",
+  "files": [
+    "Wad.mjs"
+  ],
+  "dependencies": {
+    "weakermap": "^0.0.10"
+  }
 }
