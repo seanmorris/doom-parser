@@ -289,8 +289,9 @@ class Flat
 		this.pos   = pos;
 		this.size  = size;
 		this.name  = name;
-		this.url   = null;
 		this.animation = null;
+		this.decoding = [];
+		this.urls = [];
 
 		const prefix = name.replace(/\d+$/, '');
 
@@ -303,19 +304,24 @@ class Flat
 
 	decode(lightLevel = 0)
 	{
-		if(this.decoding)
+		if(this.decoding[lightLevel])
 		{
-			return this.decoding;
+			return this.decoding[lightLevel];
 		}
 
-		return this.decoding = this.decodeAsync(lightLevel);
+		return this.decoding[lightLevel] = this.decodeAsync(lightLevel);
 	}
 
 	async decodeAsync(lightLevel = 0)
 	{
-		if(this.url)
+		if(this.decoding[lightLevel])
 		{
-			return this.url;
+			return this.decoding[lightLevel];
+		}
+
+		if(this.urls[lightLevel])
+		{
+			return this.urls[lightLevel];
 		}
 
 		const colorMap = this.wad.getLumpByName('COLORMAP');
@@ -346,7 +352,7 @@ class Flat
 		// context.drawImage(canvas, 0, 0);
 		// context.setTransform(1,0,0, 1,0,0);
 
-		return this.url = new ResourceUrl(await canvas.convertToBlob());
+		return this.urls[lightLevel] = new ResourceUrl(await canvas.convertToBlob());
 	}
 }
 
@@ -383,8 +389,10 @@ class Patch
 			return this.decoded;
 		}
 
-		const colorMap = this.wad.getLumpByName('COLORMAP');
-		const playPal  = this.wad.getLumpByName('PLAYPAL');
+		const loader = this.wad.loader || this.wad;
+
+		const colorMap = loader.getLumpByName('COLORMAP');
+		const playPal  = loader.getLumpByName('PLAYPAL');
 
 		const width    = this.wad.view.getInt16(this.pos + 0*SHORT, true);
 		const height   = this.wad.view.getInt16(this.pos + 1*SHORT, true);
@@ -474,6 +482,7 @@ class Texture
 		this.height  = height;
 		this.animation = null;
 		this.patches = patches;
+		this.decoding = [];
 
 		const prefix = name.replace(/\d+$/, '');
 
@@ -485,19 +494,19 @@ class Texture
 
 	decode(lightLevel = 0)
 	{
-		if(this.decoding)
+		if(this.decoding[lightLevel])
 		{
-			return this.decoding;
+			return this.decoding[lightLevel];
 		}
 
-		return this.decoding = this.decodeAsync(lightLevel);
+		return this.decoding[lightLevel] = this.decodeAsync(lightLevel);
 	}
 
 	async decodeAsync(lightLevel = 0)
 	{
-		if(this.decoding)
+		if(this.decoding[lightLevel])
 		{
-			return this.decoding;
+			return this.decoding[lightLevel];
 		}
 
 		const canvas = new OffscreenCanvas(this.width, this.height);
@@ -1710,10 +1719,11 @@ class WadMap
 
 export class Wad
 {
-	constructor(byteArray)
+	constructor(byteArray, loader = null)
 	{
 		Object.defineProperty(this, 'bytes', {value: new Uint8Array(byteArray)});
 		Object.defineProperty(this, 'view', {value: new DataView(this.bytes.buffer)});
+		Object.defineProperty(this, 'loader', {value: loader});
 		Object.defineProperty(this, 'cache', {value: {}});
 		Object.defineProperty(this, 'entries', {value: {}});
 		Object.defineProperty(this, 'lumps', {value: {}});
@@ -1728,6 +1738,8 @@ export class Wad
 		for(let i = 0; i < this.lumpCount; i++)
 		{
 			const entry = this.getDirEntry(i);
+			const existing = this.entries[entry.name];
+			if(existing && !MAP_LUMPS.includes(entry.name)) console.warn(`Lump index ${i} "${entry.name}" is double defined (${existing.index}).`);
 			this.entries[entry.name] = entry;
 			this.lumps[entry.name] = this.lump(i);
 		}
@@ -1811,7 +1823,7 @@ export class Wad
 	{
 		const entry = this.getEntryByName(name);
 
-		if(!name)
+		if(!entry)
 		{
 			return null;
 		}
@@ -2110,7 +2122,7 @@ export class WadLoader
 {
 	constructor(...byteArray)
 	{
-		const wads = byteArray.map(rawBytes => new Wad(rawBytes));
+		const wads = byteArray.map(rawBytes => new Wad(rawBytes, this));
 		this.wads = [...wads].reverse();
 
 		if(wads[0].type !== 'IWAD')
