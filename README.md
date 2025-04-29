@@ -46,6 +46,14 @@ for (let i = 0; i < map.thingCount; i++) {
 }
 ```
 
+## Wads Files:
+
+The shareware `DOOM1.WAD` can be downloaded [here](https://ia801909.us.archive.org/view_archive.php?archive=/2/items/doom_20230531/doom_dos.ZIP).
+
+`Freedoom 1 & 2` (open source replacement PWADs for non-shareware episodes) are available [here](https://archive.org/download/freedoom-0.13.0/freedoom-0.13.0.zip/freedoom-0.13.0%2Ffreedoom1.wad) and [here](https://archive.org/download/freedoom-0.13.0/freedoom-0.13.0.zip/freedoom-0.13.0%2Ffreedoom2.wad)
+
+`Skulltag-v097d5.wad` is available [here]().
+
 ## API
 
 The system uses the following classes. Classes marked with a `*` are not directly exported by the module, but are returned by methods.
@@ -264,8 +272,8 @@ Number property. The amount of subsectors in the map.
 
 Returns a subsector object by index with the following properties:
 
-* count
-* start
+* `count`
+* `start`
 
 #### nodeCount
 
