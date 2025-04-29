@@ -43,6 +43,24 @@ function decodeText(bytes)
 	return dec.decode(bytes).replace(/\0*$/, '')
 }
 
+const nearestPointOnLine = (px, py, x1, y1, x2, y2) => {
+	const dx = x2 - x1;
+	const dy = y2 - y1;
+
+	if(!dx && !dy)
+	{
+		return {x: 0, y: 0};
+	}
+
+	const t = (((px - x1) * dx + (py - y1) * dy) / (dx**2 + dy**2));
+	const c = Math.max(0, Math.min(1, t));
+
+	const x = x1 + c *dx;
+	const y = y1 + c *dy;
+
+	return {x, y};
+};
+
 const UrlRegistry = new FinalizationRegistry(url => URL.revokeObjectURL(url));
 
 class ResourceUrl
@@ -87,6 +105,8 @@ class Bounds
 	}
 }
 
+const stitched = new WeakMap;
+
 class GlSubsector
 {
 	constructor({map, count, first, index})
@@ -103,27 +123,36 @@ class GlSubsector
 		Object.freeze(this);
 	}
 
-	vertexes(normalized = false)
+	vertexes()
 	{
 		const vertexes = [];
 
 		for(let i = 0; i < this.count; i++)
 		{
-			const seg = this.map.glSeg(this.first + i);
+			const seg  = this.map.glSeg(this.first + i);
+			const from = seg.startIsGlVert ? this.map.glVert(seg.start) : this.map.vertex(seg.start);
+			const to   = seg.endIsGlVert   ? this.map.glVert(seg.end)   : this.map.vertex(seg.end);
 
-			const _from = seg.startIsGlVert ? this.map.glVert(seg.start) : this.map.vertex(seg.start);
-			const _to   = seg.endIsGlVert   ? this.map.glVert(seg.end)   : this.map.vertex(seg.end);
-
-			const from = normalized ? {x: _from.x - this.bounds.xCenter, y: _from.y - this.bounds.yCenter}: _from;
-			const to   = normalized ? {x: _to.x   - this.bounds.xCenter, y: _to.y   - this.bounds.yCenter}: _to;
+			const v = [];
 
 			if(i === 0)
 			{
-				vertexes.push(from, to);
+				v.push(from, to);
 			}
 			else
 			{
-				vertexes.push(to);
+				v.push(to);
+			}
+
+			for(const w of v)
+			{
+				if(this.map.stitched.has(w))
+				{
+					vertexes.push( this.map.stitched.get(w) );
+					continue;
+				}
+
+				vertexes.push(w);
 			}
 		}
 
@@ -261,19 +290,28 @@ class Flat
 		this.size  = size;
 		this.name  = name;
 		this.url   = null;
+		this.animation = null;
+
+		const prefix = name.replace(/\d+$/, '');
+
+		if(this.wad.flatAnim[prefix])
+		{
+			this.animation = prefix;
+
+		}
 	}
 
-	decode()
+	decode(lightLevel = 0)
 	{
 		if(this.decoding)
 		{
 			return this.decoding;
 		}
 
-		return this.decoding = this.decodeAsync();
+		return this.decoding = this.decodeAsync(lightLevel);
 	}
 
-	async decodeAsync()
+	async decodeAsync(lightLevel = 0)
 	{
 		if(this.url)
 		{
@@ -292,7 +330,7 @@ class Flat
 		for(let i = 0; i < data.length; i++)
 		{
 			const o = data[i];
-			const c = colorMap[o];
+			const c = colorMap[o + lightLevel * 0x100];
 			const x = i % 64;
 			const y = Math.trunc(i / 64);
 			const p = (x + (63-y) * 64) * 4;
@@ -338,7 +376,7 @@ class Patch
 		return {row, height, pixels, length};
 	}
 
-	decode()
+	decode(lightLevel = 0)
 	{
 		if(this.decoded)
 		{
@@ -371,14 +409,15 @@ class Patch
 				const p = 4 * (x + y * width);
 
 				const o = post.pixels[j];
-				const c = colorMap[o];
+				const c = colorMap[o + lightLevel * 0x100];
 
 				decoded.data[p + 0] = playPal[3 * c + 0];
 				decoded.data[p + 1] = playPal[3 * c + 1];
 				decoded.data[p + 2] = playPal[3 * c + 2];
-				decoded.data[p + 3] = (decoded.data[p + 0] === 0x00 && decoded.data[p + 1] === 0xFF && decoded.data[p + 2] === 0xFF)
-					? 0x00
-					: 0xFF;
+				decoded.data[p + 3] =
+					(decoded.data[p + 0] === 0x00 && decoded.data[p + 1] === 0xFF && decoded.data[p + 2] === 0xFF)
+						? 0x00
+						: 0xFF;
 			}
 
 			i += post.length;
@@ -433,20 +472,28 @@ class Texture
 		this.name    = name;
 		this.width   = width;
 		this.height  = height;
+		this.animation = null;
 		this.patches = patches;
+
+		const prefix = name.replace(/\d+$/, '');
+
+		if(this.wad.texAnim[prefix])
+		{
+			this.animation = prefix;
+		}
 	}
 
-	decode()
+	decode(lightLevel = 0)
 	{
 		if(this.decoding)
 		{
 			return this.decoding;
 		}
 
-		return this.decoding = this.decodeAsync();
+		return this.decoding = this.decodeAsync(lightLevel);
 	}
 
-	async decodeAsync()
+	async decodeAsync(lightLevel = 0)
 	{
 		if(this.decoding)
 		{
@@ -456,19 +503,11 @@ class Texture
 		const canvas = new OffscreenCanvas(this.width, this.height);
 		const context = canvas.getContext('2d');
 
-		if(this.name === 'STARTAN2')
-		{
-		}
-
 		for(const patchRef of this.patches)
 		{
 			const patch = new Patch({wad:this.wad, ...this.wad.getEntryByName(patchRef.pname)});
-			context.putImageData(patch.decode(), patchRef.xOff, patchRef.yOff);
-
-			if(this.name === 'STARTAN2')
-			{
-				console.log({patch});
-			}
+			const decoded = await createImageBitmap(patch.decode(lightLevel));
+			context.drawImage(decoded, Math.max(0, patchRef.xOff), Math.max(0, patchRef.yOff));
 		}
 
 		return new ResourceUrl(await canvas.convertToBlob());
@@ -488,6 +527,7 @@ class WadMap
 			bsp:   {value: []},
 			linedefIndex: {value: {}},
 			glssectIndex: {value: {}},
+			stitched: {value: new Map},
 		});
 
 		for(let i = 0; i < this.linedefCount; i++)
@@ -518,6 +558,46 @@ class WadMap
 		for(let i = 0; i < this.glNodeCount; i++)
 		{
 			this.bsp.push(this.glNode(i))
+		}
+
+		const stitchWarnings = [];
+
+		for(let i = 0; i < this.glSegCount; i++)
+		{
+			const seg = this.glSeg(i);
+
+			if(seg.linedef < 0) continue;
+
+			const from = seg.startIsGlVert ? this.glVert(seg.start) : this.vertex(seg.start);
+			const to   = seg.endIsGlVert   ? this.glVert(seg.end)   : this.vertex(seg.end);
+
+			const linedef = this.linedef(seg.linedef);
+			const ldf = this.vertex(linedef.from);
+			const ldt = this.vertex(linedef.to);
+
+			const glVerts = [];
+
+			if(seg.startIsGlVert) glVerts.push(from);
+			if(seg.endIsGlVert)   glVerts.push(to);
+
+			for(const vertex of glVerts)
+			{
+				const nearest = nearestPointOnLine(vertex.x, vertex.y, ldf.x, ldf.y, ldt.x, ldt.y);
+
+				if(vertex.x === nearest.x && vertex.y === nearest.y) continue;
+
+				stitchWarnings.push(`Stitching GLVert #${vertex.index} to Linedef #${linedef.index} (${vertex.x}, ${vertex.y})=>(${nearest.x}, ${nearest.y})!`);
+
+				nearest.gl = false;
+				nearest.virtual = true;
+
+				this.stitched.set(vertex, nearest);
+			}
+		}
+
+		if(stitchWarnings.length)
+		{
+			console.warn(`Stitched ${stitchWarnings.length} glVerts to linedefs.`);
 		}
 
 		Object.freeze(this);
@@ -578,7 +658,7 @@ class WadMap
 			const type  = this.wad.view.getInt16(thingStart + 3*SHORT, true);
 			const flags = this.wad.view.getInt16(thingStart + 4*SHORT, true);
 
-			const thing = {x, y, angle, type, flags};
+			const thing = {x, y, angle, type, flags, index};
 
 			this.cache.thing.set(index, thing);
 
@@ -762,7 +842,7 @@ class WadMap
 		const x = this.wad.view.getInt16(vertexStart + 0*SHORT, true);
 		const y = this.wad.view.getInt16(vertexStart + 1*SHORT, true);
 
-		const vertex = {x, y, index};
+		const vertex = {x, y, index, gl: false, virtual: false};
 
 		this.cache.vertex.set(index, vertex);
 
@@ -1070,7 +1150,7 @@ class WadMap
 			const x = this.wad.view.getInt16(glVertexStart + 0*SHORT, true);
 			const y = this.wad.view.getInt16(glVertexStart + 1*SHORT, true);
 
-			const glVert = {x, y, index};
+			const glVert = {x, y, index, gl: true, virtual: false};
 
 			this.cache.glVert.set(index, glVert);
 
@@ -1086,8 +1166,7 @@ class WadMap
 			const yLo = this.wad.view.getInt16(glVertexStart + 2*SHORT, true) / 0x10000;
 			const yHi = this.wad.view.getInt16(glVertexStart + 3*SHORT, true);
 
-			// const glVert = {x:xLo, y:yLo, index};
-			const glVert = {x:xHi+xLo, y:yHi+yLo, index};
+			const glVert = {x:xHi+xLo, y:yHi+yLo, index, gl: true, virtual: false};
 
 			this.cache.glVert.set(index, glVert);
 
@@ -1101,7 +1180,7 @@ class WadMap
 			const x = this.wad.view.getInt32(glVertexStart + 0*INT, true) / 0xFFFF;
 			const y = this.wad.view.getInt32(glVertexStart + 1*INT, true) / 0xFFFF;
 
-			const glVert = {x, y, index};
+			const glVert = {x, y, index, gl: true, virtual: false};
 
 			this.cache.glVert.set(index, glVert);
 
@@ -1631,9 +1710,9 @@ class WadMap
 
 export class Wad
 {
-	constructor(rawBytes)
+	constructor(byteArray)
 	{
-		Object.defineProperty(this, 'bytes', {value: new Uint8Array(rawBytes)});
+		Object.defineProperty(this, 'bytes', {value: new Uint8Array(byteArray)});
 		Object.defineProperty(this, 'view', {value: new DataView(this.bytes.buffer)});
 		Object.defineProperty(this, 'cache', {value: {}});
 		Object.defineProperty(this, 'entries', {value: {}});
@@ -1641,6 +1720,8 @@ export class Wad
 		Object.defineProperty(this, 'patches', {value: {}});
 		Object.defineProperty(this, 'textures', {value: {}});
 		Object.defineProperty(this, 'flats', {value: {}});
+		Object.defineProperty(this, 'texAnim', {value: {}});
+		Object.defineProperty(this, 'flatAnim', {value: {}});
 		Object.defineProperty(this, 'sprites', {value: {}});
 		Object.defineProperty(this, 'sounds', {value: {}});
 
@@ -1651,10 +1732,11 @@ export class Wad
 			this.lumps[entry.name] = this.lump(i);
 		}
 
-		this.loadPatches();
-		this.loadTextures();
 		this.loadFlats();
+		this.loadPatches();
 		this.loadSprites();
+		this.loadTextures();
+		this.loadAnimations();
 
 		Object.freeze(this.bytes.buffer);
 		Object.freeze(this);
@@ -1705,14 +1787,10 @@ export class Wad
 		return this.view.getUint32(4, true);
 	}
 
-	get dirStart()
-	{
-		return this.view.getUint32(8, true);
-	}
-
 	getDirEntry(index)
 	{
-		const entryStart = this.dirStart + index * DIR_ENTRY_LEN;
+		const dirStart = this.view.getUint32(8, true);
+		const entryStart = dirStart + index * DIR_ENTRY_LEN;
 
 		const pos = this.view.getUint32(entryStart, true);
 		const size = this.view.getUint32(entryStart + 4, true);
@@ -1778,6 +1856,11 @@ export class Wad
 		const HEADER = this.getEntryByName(mapName);
 		const entries = {HEADER};
 
+		if(!HEADER)
+		{
+			return;
+		}
+
 		for(let i = 1 + HEADER.index; i < this.lumpCount; i++)
 		{
 			const entry = this.getDirEntry(i);
@@ -1819,6 +1902,12 @@ export class Wad
 	loadTextures()
 	{
 		const pnameEntry = this.getEntryByName('PNAMES');
+
+		if(!pnameEntry)
+		{
+			return;
+		}
+
 		const count = this.view.getUint32(pnameEntry.pos, true);
 		const pnames = [];
 
@@ -1860,7 +1949,7 @@ export class Wad
 					patches.push({xOff, yOff, index, pname:pnames[index], stepDir, colorMap});
 				}
 
-				this.textures[name] = new Texture({wad: this, name, width, height, patches});
+				this.textures[name] = {wad: this, name, width, height, patches};
 			}
 		}
 	}
@@ -1911,16 +2000,53 @@ export class Wad
 		}
 	}
 
-	patch(name)
+	loadAnimations()
 	{
-		if(!this.cache.patch)
+		for(const textureName of Object.keys(this.textures))
 		{
-			this.cache.patch = new Map;
+			const prefix = textureName.replace(/\d+$/, '');
+
+			if(!defaultAnimatedTextures.has(prefix))
+			{
+				continue;
+			}
+
+			if(!this.texAnim[prefix])
+			{
+				this.texAnim[prefix] = [];
+			}
+
+			this.texAnim[prefix].push(textureName);
 		}
 
-		if(this.cache.patch.has(name))
+		for(const flatName of Object.keys(this.flats))
 		{
-			return this.cache.patch.get(name);
+			const prefix = flatName.replace(/\d+$/, '');
+
+			if(!defaultAnimatedFlats.has(prefix))
+			{
+				continue;
+			}
+
+			if(!this.flatAnim[prefix])
+			{
+				this.flatAnim[prefix] = [];
+			}
+
+			this.flatAnim[prefix].push(flatName);
+		}
+	}
+
+	texture(name)
+	{
+		if(!this.cache.texture)
+		{
+			this.cache.texture = new Map;
+		}
+
+		if(this.cache.texture.has(name))
+		{
+			return this.cache.texture.get(name);
 		}
 
 		if(!this.textures[name])
@@ -1928,25 +2054,16 @@ export class Wad
 			return null;
 		}
 
-		const texture = this.textures[name];
+		const texture = new Texture(this.textures[name]);
 
-		const patchName = this.patches[ texture.patches[0].pname ];
+		this.cache.texture.set(name, texture);
 
-		if(!patchName)
-		{
-			return null;
-		}
-
-		const patch = new Picture(patchName);
-
-		this.cache.patch.set(name, patch);
-
-		return patch;
+		return texture;
 	}
 
-	texture(name)
+	textureAnimation(name)
 	{
-		return this.textures[name];
+		return this.texAnim[name];
 	}
 
 	flat(name)
@@ -1973,6 +2090,11 @@ export class Wad
 		return flat;
 	}
 
+	flatAnimation(name)
+	{
+		return this.flatAnim[name];
+	}
+
 	sprite(name)
 	{
 		if(!this.sprites[name])
@@ -1983,3 +2105,152 @@ export class Wad
 		return new Picture(this.sprites[name]);
 	}
 }
+
+export class WadLoader
+{
+	constructor(...byteArray)
+	{
+		const wads = byteArray.map(rawBytes => new Wad(rawBytes));
+		this.wads = [...wads].reverse();
+
+		if(wads[0].type !== 'IWAD')
+		{
+			console.warn(`Type of first .WAD is ${wads[0].type}, expected IWAD.`);
+		}
+
+		Object.freeze(this.wads);
+		Object.freeze(this);
+	}
+
+	getDirEntry(index)
+	{
+		for(const wad of this.wads)
+		{
+			const entry = wad.getDirEntry(index);
+			if(entry) return entry;
+		}
+	}
+
+	getDirEntryByName(name)
+	{
+		for(const wad of this.wads)
+		{
+			const entry = wad.getDirEntryByName(name);
+			if(entry) return entry;
+		}
+	}
+
+	getLumpByName(name)
+	{
+		for(const wad of this.wads)
+		{
+			const lump = wad.getLumpByName(name);
+			if(lump) return lump;
+		}
+	}
+
+	lump(index)
+	{
+		for(const wad of this.wads)
+		{
+			const lump = wad.lump(index);
+			if(lump) return lump;
+		}
+	}
+
+	findMaps()
+	{
+		const maps = new Set;
+
+		for(const wad of this.wads)
+		{
+			const wadMaps = wad.findMaps();
+			wadMaps.forEach(map => maps.add(map));
+		}
+
+		return [...maps];
+	}
+
+	loadMap(mapName)
+	{
+		for(const wad of this.wads)
+		{
+			const map = wad.loadMap(mapName);
+			if(map) return map;
+		}
+	}
+
+	texture(name)
+	{
+		for(const wad of this.wads)
+		{
+			const texture = wad.texture(name);
+			if(texture) return texture;
+		}
+	}
+
+	textureAnimation(name)
+	{
+		for(const wad of this.wads)
+		{
+			const texture = wad.textureAnimation(name);
+			if(texture) return texture;
+		}
+	}
+
+	flat(name)
+	{
+		for(const wad of this.wads)
+		{
+			const flat = wad.flat(name);
+			if(flat) return flat;
+		}
+	}
+
+	flatAnimation(name)
+	{
+		for(const wad of this.wads)
+		{
+			const animation = wad.flatAnimation(name);
+			if(animation) return animation;
+		}
+	}
+
+	sprite()
+	{
+		for(const wad of this.wads)
+		{
+			const sprite = wad.sprite(name);
+			if(sprite) return sprite;
+		}
+	}
+}
+
+const defaultAnimatedTextures = new Set([
+	'BLODGR',
+	'BLODRIP',
+	'FIREBLU',
+	'FIRELAV',
+	'FIREMAG',
+	'FIREWAL',
+	'GSTFONT',
+	'ROCKRED',
+	'SLADRIP',
+	'BFALL',
+	'SFALL',
+	'WFALL',
+	'DBRAIN',
+]);
+
+const defaultAnimatedFlats = new Set([
+	'NUKAGE',
+	'FWATER',
+	'SWATER',
+	'LAVA',
+	'BLOOD',
+	'RROCK0',
+	'SLIME0',
+	'SLIME0',
+	'SLIME0',
+]);
+

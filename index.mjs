@@ -1,9 +1,11 @@
 import fs from 'node:fs';
-import { Wad } from './Wad.mjs';
+import { Wad, WadLoader } from './Wad.mjs';
 
 const args = process.argv.slice(2);
 const [wadFile, mapName] = args;
-const wad = new Wad( fs.readFileSync(wadFile) );
+const wad = new WadLoader(
+	new Wad( fs.readFileSync(wadFile) )
+);
 
 console.error(`${wad.type} ${wad.format} ${wadFile}`);
 console.error(wad.info);
