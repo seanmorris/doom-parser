@@ -197,7 +197,7 @@ DOOM format maps have LINEDEFs with the following properties:
 * `from`
 * `to`
 * `flags`
-* `types`
+* `action`
 * `tag`
 * `right`
 * `left`

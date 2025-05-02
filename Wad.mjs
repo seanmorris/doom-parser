@@ -187,7 +187,7 @@ class GlSubsector
 		{
 			const seg = this.map.glSeg(this.first + i);
 
-			if(seg.linedef > 0)
+			if(seg.linedef >= 0)
 			{
 				const linedef = this.map.linedef(seg.linedef);
 				const sidedef = this.map.sidedef(seg.side ? linedef.left : linedef.right);
@@ -348,8 +348,6 @@ class Flat
 		}
 
 		context.putImageData(pixels, 0, 0);
-		// context.drawImage(canvas, 0, 0);
-		// context.setTransform(1,0,0, 1,0,0);
 
 		return this.urls[lightLevel] = new ResourceUrl(await canvas.convertToBlob());
 	}
@@ -434,7 +432,9 @@ class Patch
 			i += post.length;
 		}
 
-		return this.decoded = decoded;
+		context.putImageData(decoded, 0, 0);
+
+		return this.decoded = canvas;
 	}
 }
 
@@ -475,7 +475,7 @@ class Picture
 		const patch = new Patch(this);
 		this.width  = width;
 		this.height = height;
-		canvas.getContext('2d').putImageData(patch.decode(), 0, 0);
+		canvas.getContext('2d').drawImage(patch.decode(), 0, 0);
 		return this.url = new ResourceUrl(await canvas.convertToBlob());
 	}
 }
@@ -799,20 +799,20 @@ class WadMap
 			const LINEDEF_LEN =  7*SHORT;
 			const linedefStart = this.lumps.LINEDEFS.pos + LINEDEF_LEN * index;
 
-			const from  = this.wad.view.getUint16(linedefStart + 0*SHORT, true);
-			const to    = this.wad.view.getUint16(linedefStart + 1*SHORT, true);
-			const flags = this.wad.view.getUint16(linedefStart + 2*SHORT, true);
-			const types = this.wad.view.getUint16(linedefStart + 3*SHORT, true);
+			const from   = this.wad.view.getUint16(linedefStart + 0*SHORT, true);
+			const to     = this.wad.view.getUint16(linedefStart + 1*SHORT, true);
+			const flags  = this.wad.view.getUint16(linedefStart + 2*SHORT, true);
+			const action = this.wad.view.getUint16(linedefStart + 3*SHORT, true);
 
-			const tag   = this.wad.view.getUint16(linedefStart + 4*SHORT, true);
-			const right = this.wad.view.getUint16(linedefStart + 5*SHORT, true);
-			const left  = this.wad.view.getUint16(linedefStart + 6*SHORT, true);
+			const tag    = this.wad.view.getUint16(linedefStart + 4*SHORT, true);
+			const right  = this.wad.view.getUint16(linedefStart + 5*SHORT, true);
+			const left   = this.wad.view.getUint16(linedefStart + 6*SHORT, true);
 
 			const linedef = {
 				from,
 				to,
 				flags,
-				types,
+				action,
 				tag,
 				right,
 				left: left < 0xFFFF ? left : -1,
@@ -1842,6 +1842,12 @@ export class Wad
 		Object.freeze(this);
 	}
 
+	async hash()
+	{
+		const hash = new Uint8Array(await window.crypto.subtle.digest("SHA-256", this.bytes));
+		return [...hash].map(byte => byte.toString(16).padStart(2, '0')).join('').toUpperCase();
+	}
+
 	get type()
 	{
 		if('type' in this.cache)
@@ -2249,6 +2255,16 @@ export class Wad
 
 		return this.sprites[name];
 	}
+
+	picture(name)
+	{
+		if(!this.entries[name])
+		{
+			return;
+		}
+
+		return new Picture(this.entries[name])
+	}
 }
 
 export class WadLoader
@@ -2265,6 +2281,11 @@ export class WadLoader
 
 		Object.freeze(this.wads);
 		Object.freeze(this);
+	}
+
+	async hash()
+	{
+		return await Promise.all(this.wads.map(w => w.hash()));
 	}
 
 	getDirEntry(index)
@@ -2367,6 +2388,15 @@ export class WadLoader
 		{
 			const sprite = wad.sprite(name);
 			if(sprite) return sprite;
+		}
+	}
+
+	picture(name)
+	{
+		for(const wad of this.wads)
+		{
+			const picture = wad.picture(name);
+			if(picture) return picture;
 		}
 	}
 }
