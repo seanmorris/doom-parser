@@ -348,7 +348,6 @@ class Flat
 		}
 
 		context.putImageData(pixels, 0, 0);
-		// context.setTransform(1,0,0, -1,0,0);
 		// context.drawImage(canvas, 0, 0);
 		// context.setTransform(1,0,0, 1,0,0);
 
@@ -366,19 +365,17 @@ class Patch
 		this.size  = size;
 		this.name  = name;
 		this.decoded = null;
+		this.width = 0;
+		this.height = 0;
+		this.transparent = false;
 	}
 
 	decodePost(offset)
 	{
 		const row    = this.wad.view.getUint8(offset + 0*BYTE);
 		const height = this.wad.view.getUint8(offset + 1*BYTE);
-
-		// next byte (offset + 2*BYTE) is UNUSED.
 		const pixels = this.wad.bytes.slice(offset + 3*BYTE, offset + 3*BYTE + height);
-
-		// last byte is UNUSED.
 		const length = 3*BYTE + height*BYTE + 1*BYTE;
-
 		return {row, height, pixels, length};
 	}
 
@@ -399,15 +396,24 @@ class Patch
 		const leftOff  = this.wad.view.getInt16(this.pos + 2*SHORT, true);
 		const topOff   = this.wad.view.getInt16(this.pos + 3*SHORT, true);
 
+		this.width  = width;
+		this.height = height;
+
 		const canvas  = new OffscreenCanvas(width, height);
 		const context = canvas.getContext('2d');
-
 		const decoded = context.getImageData(0, 0, width, height);
 
 		let column = 0;
 		const start = this.pos + 4*SHORT + 4*width;
-		for(let i = start; i < this.pos + this.size; i)
+		for(let i = start; column < width;)
 		{
+			if(0xFF === this.wad.view.getUint8(i, true))
+			{
+				column++;
+				i++;
+				continue;
+			}
+
 			const post = this.decodePost(i);
 
 			for(const j in post.pixels)
@@ -422,18 +428,10 @@ class Patch
 				decoded.data[p + 0] = playPal[3 * c + 0];
 				decoded.data[p + 1] = playPal[3 * c + 1];
 				decoded.data[p + 2] = playPal[3 * c + 2];
-				decoded.data[p + 3] =
-					(decoded.data[p + 0] === 0x00 && decoded.data[p + 1] === 0xFF && decoded.data[p + 2] === 0xFF)
-						? 0x00
-						: 0xFF;
+				decoded.data[p + 3] = 0xFF;
 			}
 
 			i += post.length;
-			if(0xFF === this.wad.view.getUint8(i, true))
-			{
-				column++;
-				i++;
-			}
 		}
 
 		return this.decoded = decoded;
@@ -449,6 +447,9 @@ class Picture
 		this.pos   = pos;
 		this.size  = size;
 		this.name  = name;
+		this.width = 0;
+		this.height = 0;
+		this.url = null;
 	}
 
 	decode()
@@ -463,12 +464,19 @@ class Picture
 
 	async decodeAsync()
 	{
+		if(this.url)
+		{
+			return this.url;
+		}
+
 		const width = this.wad.view.getInt16(this.pos + 0*SHORT, true);
 		const height = this.wad.view.getInt16(this.pos + 1*SHORT, true);
 		const canvas = new OffscreenCanvas(width, height);
 		const patch = new Patch(this);
+		this.width  = width;
+		this.height = height;
 		canvas.getContext('2d').putImageData(patch.decode(), 0, 0);
-		return new ResourceUrl(await canvas.convertToBlob());
+		return this.url = new ResourceUrl(await canvas.convertToBlob());
 	}
 }
 
@@ -483,6 +491,7 @@ class Texture
 		this.animation = null;
 		this.patches = patches;
 		this.decoding = [];
+		this.transparent = false;
 
 		const prefix = name.replace(/\d+$/, '');
 
@@ -519,7 +528,41 @@ class Texture
 			context.drawImage(decoded, Math.max(0, patchRef.xOff), Math.max(0, patchRef.yOff));
 		}
 
+		const pixels  = context.getImageData(0, 0, canvas.width, canvas.height);
+
+		for(let i = 3; i < pixels.data.length; i+= 4)
+		{
+			if(pixels.data[i] < 0xFF)
+			{
+				this.transparent = true;
+				break;
+			}
+		}
+
 		return new ResourceUrl(await canvas.convertToBlob());
+	}
+}
+
+class Sprite
+{
+	constructor(frames)
+	{
+		this.frames = frames;
+	}
+
+	async decode(lightLevel)
+	{
+		frame: for(const f in this.frames)
+		angle: for(const a in this.frames[f])
+		{
+			const url = await _sprite[f][a].decode(lightLevel);
+			const texture = textureLoader.load(url);
+			texture.colorSpace = THREE.SRGBColorSpace;
+			sprite[f] = sprite[f] || [];
+			sprite[f][a] = texture;
+			texture.magFilter = THREE.NearestFilter;
+			texture.colorSpace = THREE.SRGBColorSpace;
+		}
 	}
 }
 
@@ -666,8 +709,17 @@ class WadMap
 			const angle = this.wad.view.getInt16(thingStart + 2*SHORT, true);
 			const type  = this.wad.view.getInt16(thingStart + 3*SHORT, true);
 			const flags = this.wad.view.getInt16(thingStart + 4*SHORT, true);
+			const meta  = thingTable[type];
 
-			const thing = {x, y, angle, type, flags, index};
+			const diff0  = flags & (1<<0);
+			const diff1  = flags & (1<<1);
+			const diff2  = flags & (1<<2);
+			const ambush = flags & (1<<3);
+			const multip = flags & (1<<4);
+
+			const flagsSplit = {diff0, diff1, diff2, ambush, multip};
+
+			const thing = {x, y, angle, type, flags:flagsSplit, index, meta};
 
 			this.cache.thing.set(index, thing);
 
@@ -686,14 +738,29 @@ class WadMap
 			const type    = this.wad.view.getUint16(thingStart + 5*SHORT, true);
 			const flags   = this.wad.view.getUint16(thingStart + 6*SHORT, true);
 
+			const diff0   = flags & (1<<0);
+			const diff1   = flags & (1<<1);
+			const diff2   = flags & (1<<2);
+			const ambush  = flags & (1<<3);
+			const dormant = flags & (1<<4);
+			const fighter = flags & (1<<5);
+			const cleric  = flags & (1<<6);
+			const mage    = flags & (1<<7);
+			const single  = flags & (1<<8);
+			const coop    = flags & (1<<9);
+			const deathmatch = flags & (1<<10);
+
+			const flagsSplit = {diff0, diff1, diff2, ambush, dormant, fighter, cleric, mage, single, coop, deathmatch}
+
 			const special =  this.wad.view.getUint8(thingStart + 7*SHORT + 0*BYTE, true);
 			const arg1    =  this.wad.view.getUint8(thingStart + 7*SHORT + 1*BYTE, true);
 			const arg2    =  this.wad.view.getUint8(thingStart + 7*SHORT + 2*BYTE, true);
 			const arg3    =  this.wad.view.getUint8(thingStart + 7*SHORT + 3*BYTE, true);
 			const arg4    =  this.wad.view.getUint8(thingStart + 7*SHORT + 4*BYTE, true);
 			const arg5    =  this.wad.view.getUint8(thingStart + 7*SHORT + 5*BYTE, true);
+			const meta    = thingTable[type];
 
-			const thing = {id, x, y, z, angle, type, flags, special, arg1, arg2, arg3, arg4, arg5, index}
+			const thing = {id, x, y, z, angle, type, flags:flagsSplit, special, arg1, arg2, arg3, arg4, arg5, index, meta}
 
 			this.cache.thing.set(index, thing);
 
@@ -1083,7 +1150,27 @@ class WadMap
 
 		const index  = xBlock + yBlock * columns;
 
+		if(index < 0 || index >= this.blockCount)
+		{
+			return [];
+		}
+
 		return this.block(index);
+	}
+
+	blocksNearPoint(x, y)
+	{
+		return [...new Set([
+			...this.blockForPoint(x, y),
+			...this.blockForPoint(x + 0x80, y),
+			...this.blockForPoint(x - 0x80, y),
+			...this.blockForPoint(x, y + 0x80),
+			...this.blockForPoint(x, y - 0x80),
+			...this.blockForPoint(x + 0x80, y + 0x80),
+			...this.blockForPoint(x - 0x80, y - 0x80),
+			...this.blockForPoint(x + 0x80, y - 0x80),
+			...this.blockForPoint(x - 0x80, y + 0x80),
+		])];
 	}
 
 	// REJECT
@@ -1732,6 +1819,7 @@ export class Wad
 		Object.defineProperty(this, 'flats', {value: {}});
 		Object.defineProperty(this, 'texAnim', {value: {}});
 		Object.defineProperty(this, 'flatAnim', {value: {}});
+		Object.defineProperty(this, 'pictures', {value: {}});
 		Object.defineProperty(this, 'sprites', {value: {}});
 		Object.defineProperty(this, 'sounds', {value: {}});
 
@@ -2008,8 +2096,53 @@ export class Wad
 
 			if(!started || entry.size === 0) continue;
 
-			this.sprites[entry.name] = entry;
+			if(entry.name.length > 6 && entry.name.match(/[A-Z]\d[A-Z]\d$/))
+			{
+				const spriteName = entry.name.slice(0, -4);
+				const frameA = entry.name.substr(-4, 1).charCodeAt(0) + -65;
+				const frameB = entry.name.substr(-2, 1).charCodeAt(0) + -65;
+				const dirA = Number(entry.name.substr(-3, 1));
+				const dirB = Number(entry.name.substr(-1, 1));
+
+				if(!this.sprites[spriteName])
+				{
+					this.sprites[spriteName] = [];
+				}
+
+				if(!this.sprites[spriteName][frameA])
+				{
+					this.sprites[spriteName][frameA] = [];
+				}
+
+				if(!this.sprites[spriteName][frameB])
+				{
+					this.sprites[spriteName][frameB] = [];
+				}
+
+				this.sprites[spriteName][frameA][dirA] = {picture: new Picture(entry), flipped: false};
+				this.sprites[spriteName][frameB][dirB] = {picture: new Picture(entry), flipped: true};
+			}
+			else if(entry.name.match(/[A-Z]\d$/))
+			{
+				const spriteName = entry.name.slice(0, -2);
+				const frame = entry.name.substr(-2, 1).charCodeAt(0) + -65;
+				const dir = Number(entry.name.substr(-1, 1));
+
+				if(!this.sprites[spriteName])
+				{
+					this.sprites[spriteName] = [];
+				}
+
+				if(!this.sprites[spriteName][frame])
+				{
+					this.sprites[spriteName][frame] = [];
+				}
+
+				this.sprites[spriteName][frame][dir] = {picture: new Picture(entry), flipped : false};
+			}
 		}
+
+		console.log(this.sprites);
 	}
 
 	loadAnimations()
@@ -2114,7 +2247,7 @@ export class Wad
 			return null;
 		}
 
-		return new Picture(this.sprites[name]);
+		return this.sprites[name];
 	}
 }
 
@@ -2228,7 +2361,7 @@ export class WadLoader
 		}
 	}
 
-	sprite()
+	sprite(name)
 	{
 		for(const wad of this.wads)
 		{
@@ -2266,3 +2399,130 @@ const defaultAnimatedFlats = new Set([
 	'SLIME0',
 ]);
 
+const thingTable = {
+	0xffff: {sprite: '----' ,'seq': '-' ,    modifier: '',    comment: '(nothing)',},
+	0x0000: {sprite: '----' ,'seq': '-' ,    modifier: '',    comment: '(nothing)',},
+	0x0001: {sprite: 'PLAY', 'seq': '+' ,    modifier: '',    comment: 'Player 1 start (Player 1 start needed on ALL levels)',},
+	0x0002: {sprite: 'PLAY', 'seq': '+' ,    modifier: '',    comment: 'Player 2 start (Player starts 2-4 are needed in)',},
+	0x0003: {sprite: 'PLAY', 'seq': '+' ,    modifier: '',    comment: 'Player 3 start (cooperative mode multiplayer games)',},
+	0x0004: {sprite: 'PLAY', 'seq': '+' ,    modifier: '',    comment: 'Player 4 start',},
+	0x000b: {sprite: '----' ,'seq': '-' ,    modifier: '',    comment: 'Deathmatch start positions. Should have >= 4/level',},
+	0x000e: {sprite: '----' ,'seq': '-' ,    modifier: '',    comment: 'Teleport landing. Where players/monsters land when they teleport to the SECTOR containing this thing',},
+	0x0bbc: {sprite: 'POSS', 'seq': '+' ,    modifier: ' # ', comment: 'FORMER HUMAN: regular pistol-shooting zombieman',},
+	0x0054: {sprite: 'SSWV', 'seq': '+' ,    modifier: ' # ', comment: 'WOLFENSTEIN SS: guest appearance by Wolf3D blue guy',},
+	0x0009: {sprite: 'SPOS', 'seq': '+' ,    modifier: ' # ', comment: 'FORMER HUMAN SERGEANT: black armor, shotgunners',},
+	0x0041: {sprite: 'CPOS', 'seq': '+' ,    modifier: ' # ', comment: 'HEAVY WEAPON DUDE: red armor, chaingunners',},
+	0x0bb9: {sprite: 'TROO', 'seq': '+' ,    modifier: ' # ', comment: 'IMP: brown, hurl fireballs',},
+	0x0bba: {sprite: 'SARG', 'seq': '+' ,    modifier: ' # ', comment: 'DEMON: pink, muscular bull-like chewers',},
+	0x003a: {sprite: 'SARG', 'seq': '+' ,    modifier: ' # ', comment: 'SPECTRE: invisible version of the DEMON',},
+	0x0bbe: {sprite: 'SKUL', 'seq': '+' ,    modifier: '^# ', comment: 'LOST SOUL: flying flaming skulls, they really bite',},
+	0x0bbd: {sprite: 'HEAD', 'seq': '+' ,    modifier: '^# ', comment: 'CACODEMON: red one-eyed floating heads. Behold...',},
+	0x0045: {sprite: 'BOS2', 'seq': '+' ,    modifier: ' # ', comment: 'HELL KNIGHT: grey-not-pink BARON, weaker',},
+	0x0bbb: {sprite: 'BOSS', 'seq': '+' ,    modifier: ' # ', comment: 'BARON OF HELL: cloven hooved minotaur boss',},
+	0x0044: {sprite: 'BSPI', 'seq': '+' ,    modifier: ' # ', comment: 'ARACHNOTRON: baby SPIDER, shoots green plasma',},
+	0x0047: {sprite: 'PAIN', 'seq': '+' ,    modifier: '^# ', comment: 'PAIN ELEMENTAL: shoots LOST SOULS, deserves its name',},
+	0x0042: {sprite: 'SKEL', 'seq': '+' ,    modifier: ' # ', comment: 'REVENANT: Fast skeletal dude shoots homing missles',},
+	0x0043: {sprite: 'FATT', 'seq': '+' ,    modifier: ' # ', comment: 'MANCUBUS: Big, slow brown guy shoots barrage of fire',},
+	0x0040: {sprite: 'VILE', 'seq': '+' ,    modifier: ' # ', comment: 'ARCH-VILE: Super-fire attack, ressurects the dead!',},
+	0x0007: {sprite: 'SPID', 'seq': '+' ,    modifier: ' # ', comment: 'SPIDER MASTERMIND: giant walking brain boss',},
+	0x0010: {sprite: 'CYBR', 'seq': '+' ,    modifier: ' # ', comment: 'CYBER-DEMON: robo-boss, rocket launcher',},
+	0x0058: {sprite: 'BBRN', 'seq': '+' ,    modifier: ' # ', comment: 'BOSS BRAIN: Horrifying visage of the ultimate demon',},
+	0x0059: {sprite: '-' ,   'seq': '-' ,    modifier: '',    comment: 'Boss Shooter: Shoots spinning skull-blocks',},
+	0x0057: {sprite: '-' ,   'seq': '-' ,    modifier: '',    comment: 'Spawn Spot: Where Todd McFarlane\'s guys appear',},
+	0x07d5: {sprite: 'CSAW', 'seq': 'a',     modifier: ' $ ', comment: 'Chainsaw',},
+	0x07d1: {sprite: 'SHOT', 'seq': 'a',     modifier: ' $ ', comment: 'Shotgun',},
+	0x0052: {sprite: 'SGN2', 'seq': 'a',     modifier: ' $ ', comment: 'Double-barreled shotgun',},
+	0x07d2: {sprite: 'MGUN', 'seq': 'a',     modifier: ' $ ', comment: 'Chaingun, gatling gun, mini-gun, whatever',},
+	0x07d3: {sprite: 'LAUN', 'seq': 'a',     modifier: ' $ ', comment: 'Rocket launcher',},
+	0x07d4: {sprite: 'PLAS', 'seq': 'a',     modifier: ' $ ', comment: 'Plasma gun',},
+	0x07d6: {sprite: 'BFUG', 'seq': 'a',     modifier: ' $ ', comment: 'Bfg9000',},
+	0x07d7: {sprite: 'CLIP', 'seq': 'a',     modifier: ' $ ', comment: 'Ammo clip',},
+	0x07d8: {sprite: 'SHEL', 'seq': 'a',     modifier: ' $ ', comment: 'Shotgun shells',},
+	0x07da: {sprite: 'ROCK', 'seq': 'a',     modifier: ' $ ', comment: 'A rocket',},
+	0x07ff: {sprite: 'CELL', 'seq': 'a',     modifier: ' $ ', comment: 'Cell charge',},
+	0x0800: {sprite: 'AMMO', 'seq': 'a',     modifier: ' $ ', comment: 'Box of Ammo',},
+	0x0801: {sprite: 'SBOX', 'seq': 'a',     modifier: ' $ ', comment: 'Box of Shells',},
+	0x07fe: {sprite: 'BROK', 'seq': 'a',     modifier: ' $ ', comment: 'Box of Rockets',},
+	0x0011: {sprite: 'CELP', 'seq': 'a',     modifier: ' $ ', comment: 'Cell charge pack',},
+	0x0008: {sprite: 'BPAK', 'seq': 'a',     modifier: ' $ ', comment: 'Backpack: doubles maximum ammo capacities',},
+	0x07db: {sprite: 'STIM', 'seq': 'a',     modifier: ' $ ', comment: 'Stimpak',},
+	0x07dc: {sprite: 'MEDI', 'seq': 'a',     modifier: ' $ ', comment: 'Medikit',},
+	0x07de: {sprite: 'BON1', 'seq': 'abcdcb',modifier: ' ! ', comment: 'Health Potion +1% health',},
+	0x07df: {sprite: 'BON2', 'seq': 'abcdcb',modifier: ' ! ', comment: 'Spirit Armor +1% armor',},
+	0x07e2: {sprite: 'ARM1', 'seq': 'ab',    modifier: ' $ ', comment: 'Green armor 100%',},
+	0x07e3: {sprite: 'ARM2', 'seq': 'ab',    modifier: ' $ ', comment: 'Blue armor 200%',},
+	0x0053: {sprite: 'MEGA', 'seq': 'abcd',  modifier: ' ! ', comment: 'Megasphere: 200% health, 200% armor',},
+	0x07dd: {sprite: 'SOUL', 'seq': 'abcdcb',modifier: ' ! ', comment: 'Soulsphere, Supercharge, +100% health',},
+	0x07e6: {sprite: 'PINV', 'seq': 'abcd',  modifier: ' ! ', comment: 'Invulnerability',},
+	0x07e7: {sprite: 'PSTR', 'seq': 'a',     modifier: ' ! ', comment: 'Berserk Strength and 100% health',},
+	0x07e8: {sprite: 'PINS', 'seq': 'abcd',  modifier: ' ! ', comment: 'Invisibility',},
+	0x07e9: {sprite: 'SUIT', 'seq': 'a',     modifier: '(!)', comment: 'Radiation suit - see notes on ! above',},
+	0x07ea: {sprite: 'PMAP', 'seq': 'abcdcb',modifier: ' ! ', comment: 'Computer map',},
+	0x07fd: {sprite: 'PVIS', 'seq': 'ab',    modifier: ' ! ', comment: 'Lite Amplification goggles',},
+	0x0005: {sprite: 'BKEY', 'seq': 'ab',    modifier: ' $ ', comment: 'Blue keycard',},
+	0x0028: {sprite: 'BSKU', 'seq': 'ab',    modifier: ' $ ', comment: 'Blue skullkey',},
+	0x000d: {sprite: 'RKEY', 'seq': 'ab',    modifier: ' $ ', comment: 'Red keycard',},
+	0x0026: {sprite: 'RSKU', 'seq': 'ab',    modifier: ' $ ', comment: 'Red skullkey',},
+	0x0006: {sprite: 'YKEY', 'seq': 'ab',    modifier: ' $ ', comment: 'Yellow keycard',},
+	0x0027: {sprite: 'YSKU', 'seq': 'ab',    modifier: ' $ ', comment: 'Yellow skullkey',},
+	0x07f3: {sprite: 'BAR1', 'seq': 'ab+',   modifier: ' # ', comment: 'Barrel; not an obstacle after blown up (BEXP sprite)',},
+	0x0048: {sprite: 'KEEN', 'seq': 'a+',    modifier: ' # ', comment: 'A guest appearance by Billy',},
+	0x0030: {sprite: 'ELEC', 'seq': 'a',     modifier: ' # ', comment: 'Tall, techno pillar',},
+	0x001e: {sprite: 'COL1', 'seq': 'a',     modifier: ' # ', comment: 'Tall green pillar',},
+	0x0020: {sprite: 'COL3', 'seq': 'a',     modifier: ' # ', comment: 'Tall red pillar',},
+	0x001f: {sprite: 'COL2', 'seq': 'a',     modifier: ' # ', comment: 'Short green pillar',},
+	0x0024: {sprite: 'COL5', 'seq': 'ab',    modifier: ' # ', comment: 'Short green pillar with beating heart',},
+	0x0021: {sprite: 'COL4', 'seq': 'a',     modifier: ' # ', comment: 'Short red pillar',},
+	0x0025: {sprite: 'COL6', 'seq': 'a',     modifier: ' # ', comment: 'Short red pillar with skull',},
+	0x002f: {sprite: 'SMIT', 'seq': 'a',     modifier: ' # ', comment: 'Stalagmite: small brown pointy stump',},
+	0x002b: {sprite: 'TRE1', 'seq': 'a',     modifier: ' # ', comment: 'Burnt tree: gray tree',},
+	0x0036: {sprite: 'TRE2', 'seq': 'a',     modifier: ' # ', comment: 'Large brown tree',},
+	0x07ec: {sprite: 'COLU', 'seq': 'a',     modifier: ' # ', comment: 'Floor lamp',},
+	0x0055: {sprite: 'TLMP', 'seq': 'abcd',  modifier: ' # ', comment: 'Tall techno floor lamp',},
+	0x0056: {sprite: 'TLP2', 'seq': 'abcd',  modifier: ' # ', comment: 'Short techno floor lamp',},
+	0x0022: {sprite: 'CAND', 'seq': 'a',     modifier: '',    comment: 'Candle',},
+	0x0023: {sprite: 'CBRA', 'seq': 'a',     modifier: ' # ', comment: 'Candelabra',},
+	0x002c: {sprite: 'TBLU', 'seq': 'abcd',  modifier: ' # ', comment: 'Tall blue firestick',},
+	0x002d: {sprite: 'TGRE', 'seq': 'abcd',  modifier: ' # ', comment: 'Tall green firestick',},
+	0x002e: {sprite: 'TRED', 'seq': 'abcd',  modifier: ' # ', comment: 'Tall red firestick',},
+	0x0037: {sprite: 'SMBT', 'seq': 'abcd',  modifier: ' # ', comment: 'Short blue firestick',},
+	0x0038: {sprite: 'SMGT', 'seq': 'abcd',  modifier: ' # ', comment: 'Short green firestick',},
+	0x0039: {sprite: 'SMRT', 'seq': 'abcd',  modifier: ' # ', comment: 'Short red firestick',},
+	0x0046: {sprite: 'FCAN', 'seq': 'abc',   modifier: ' # ', comment: 'Burning barrel',},
+	0x0029: {sprite: 'CEYE', 'seq': 'abcb',  modifier: ' # ', comment: 'Evil Eye: floating eye in symbol, over candle',},
+	0x002a: {sprite: 'FSKU', 'seq': 'abc',   modifier: ' # ', comment: 'Floating Skull: flaming skull-rock',},
+	0x0031: {sprite: 'GOR1', 'seq': 'abcb',  modifier: '^# ', comment: 'Hanging victim, twitching',},
+	0x003f: {sprite: 'GOR1', 'seq': 'abcb',  modifier: '^  ', comment: 'Hanging victim, twitching',},
+	0x0032: {sprite: 'GOR2', 'seq': 'a',     modifier: '^# ', comment: 'Hanging victim, arms out',},
+	0x003b: {sprite: 'GOR2', 'seq': 'a',     modifier: '^  ', comment: 'Hanging victim, arms out',},
+	0x0034: {sprite: 'GOR4', 'seq': 'a',     modifier: '^# ', comment: 'Hanging pair of legs',},
+	0x003c: {sprite: 'GOR4', 'seq': 'a',     modifier: '^  ', comment: 'Hanging pair of legs',},
+	0x0033: {sprite: 'GOR3', 'seq': 'a',     modifier: '^# ', comment: 'Hanging victim, 1-legged',},
+	0x003d: {sprite: 'GOR3', 'seq': 'a',     modifier: '^  ', comment: 'Hanging victim, 1-legged',},
+	0x0035: {sprite: 'GOR5', 'seq': 'a',     modifier: '^# ', comment: 'Hanging leg',},
+	0x003e: {sprite: 'GOR5', 'seq': 'a',     modifier: '^  ', comment: 'Hanging leg',},
+	0x0049: {sprite: 'HDB1', 'seq': 'a',     modifier: '^# ', comment: 'Hanging victim, guts removed',},
+	0x004a: {sprite: 'HDB2', 'seq': 'a',     modifier: '^# ', comment: 'Hanging victim, guts and brain removed',},
+	0x004b: {sprite: 'HDB3', 'seq': 'a',     modifier: '^# ', comment: 'Hanging torso, looking down',},
+	0x004c: {sprite: 'HDB4', 'seq': 'a',     modifier: '^# ', comment: 'Hanging torso, open skull',},
+	0x004d: {sprite: 'HDB5', 'seq': 'a',     modifier: '^# ', comment: 'Hanging torso, looking up',},
+	0x004e: {sprite: 'HDB6', 'seq': 'a',     modifier: '^# ', comment: 'Hanging torso, brain removed',},
+	0x0019: {sprite: 'POL1', 'seq': 'a',     modifier: ' # ', comment: 'Impaled human',},
+	0x001a: {sprite: 'POL6', 'seq': 'ab',    modifier: ' # ', comment: 'Twitching impaled human',},
+	0x001b: {sprite: 'POL4', 'seq': 'a',     modifier: ' # ', comment: 'Skull on a pole',},
+	0x001c: {sprite: 'POL2', 'seq': 'a',     modifier: ' # ', comment: '5 skulls shish kebob',},
+	0x001d: {sprite: 'POL3', 'seq': 'ab',    modifier: ' # ', comment: 'Pile of skulls and candles',},
+	0x000a: {sprite: 'PLAY', 'seq': 'w',     modifier: '',    comment: 'Bloody mess (an exploded player)',},
+	0x000c: {sprite: 'PLAY', 'seq': 'w',     modifier: '',    comment: 'Bloody mess, this thing is exactly the same as 10',},
+	0x0018: {sprite: 'POL5', 'seq': 'a',     modifier: '',    comment: 'Pool of blood and flesh',},
+	0x004f: {sprite: 'POB1', 'seq': 'a',     modifier: '',    comment: 'Pool of blood',},
+	0x0050: {sprite: 'POB2', 'seq': 'a',     modifier: '',    comment: 'Pool of blood',},
+	0x0051: {sprite: 'BRS1', 'seq': 'a',     modifier: '',    comment: 'Pool of brains',},
+	0x000f: {sprite: 'PLAY', 'seq': 'n',     modifier: '',    comment: 'Dead player',},
+	0x0012: {sprite: 'POSS', 'seq': 'l',     modifier: '',    comment: 'Dead former human',},
+	0x0013: {sprite: 'SPOS', 'seq': 'l',     modifier: '',    comment: 'Dead former sergeant',},
+	0x0014: {sprite: 'TROO', 'seq': 'm',     modifier: '',    comment: 'Dead imp',},
+	0x0015: {sprite: 'SARG', 'seq': 'n',     modifier: '',    comment: 'Dead demon',},
+	0x0016: {sprite: 'HEAD', 'seq': 'l',     modifier: '',    comment: 'Dead cacodemon',},
+	0x0017: {sprite: 'SKUL', 'seq': 'k',     modifier: '',    comment: 'Dead lost soul, invisible (they blow up when killed)',},
+}
