@@ -23,6 +23,7 @@ const MAP_LUMPS = Object.freeze([
 	, 'BEHAVIOR' //*
 	, 'SCRIPTS'  //*
 	// , 'GL_[MAP]'
+	, 'GL_LEVEL'
 	, 'GL_VERT'
 	, 'GL_SEGS'
 	, 'GL_SSECT'
@@ -73,6 +74,7 @@ class ResourceUrl
 
 	revoke()
 	{
+		console.warn('Revoking ' + this.url);
 		URL.revokeObjectURL(this.url);
 		UrlRegistry.unregister(this);
 	}
@@ -377,11 +379,18 @@ class Patch
 		return {row, height, pixels, length};
 	}
 
-	decode(lightLevel = 0)
+	async decode(lightLevel = 0)
 	{
 		if(this.decoded)
 		{
 			return this.decoded;
+		}
+
+		if(this.name === 'VOID')
+		{
+			const canvas  = new OffscreenCanvas(1, 1);
+			const context = canvas.getContext('2d');
+			return this.decoded = canvas;
 		}
 
 		const loader = this.wad.loader || this.wad;
@@ -397,12 +406,29 @@ class Patch
 		this.width  = width;
 		this.height = height;
 
+		if(width === 0x5089 && height == 0x474E)
+		{
+			console.warn(`Patch lump ${this.name} is a PNG, which is not yet supported.`);
+			const blob = new Blob([this.wad.slice(this.pos, this.pos + this.length)], {'type': 'image/png'});
+			const url  = new ResourceUrl(blob);
+			const img  = new Image;
+			img.src = url;
+			const waiter = new Promise(a => img.onload = a);
+			await waiter;
+
+			const canvas  = new OffscreenCanvas(img.width, img.height);
+			const context = canvas.getContext('2d');
+			context.putImageData(decoded, 0, 0);
+			return this.decoded = canvas;
+		}
+
 		const canvas  = new OffscreenCanvas(width, height);
 		const context = canvas.getContext('2d');
 		const decoded = context.getImageData(0, 0, width, height);
 
 		let column = 0;
 		const start = this.pos + 4*SHORT + 4*width;
+
 		for(let i = start; column < width;)
 		{
 			if(0xFF === this.wad.view.getUint8(i, true))
@@ -449,34 +475,44 @@ class Picture
 		this.name  = name;
 		this.width = 0;
 		this.height = 0;
-		this.url = null;
+		this.url = [];
+		this.decoding = [];
 	}
 
-	decode()
+	decode(lightLevel = 0)
 	{
-		if(this.decoding)
+		if(this.decoding[lightLevel])
 		{
-			return this.decoding;
+			return this.decoding[lightLevel];
 		}
 
-		return this.decoding = this.decodeAsync();
+		return this.decoding[lightLevel] = this.decodeAsync(lightLevel);
 	}
 
-	async decodeAsync()
+	async decodeAsync(lightLevel = 0)
 	{
-		if(this.url)
+		if(this.url[lightLevel])
 		{
-			return this.url;
+			return this.url[lightLevel];
 		}
 
 		const width = this.wad.view.getInt16(this.pos + 0*SHORT, true);
 		const height = this.wad.view.getInt16(this.pos + 1*SHORT, true);
+		if(width === 0x5089 && height == 0x474E)
+		{
+			// Lump is a PNG.
+			// const blob = new Blob([this.wad.slice(this.pos, this.pos + this.length)], {'type': 'image/png'});
+			console.warn(`Picture lump ${this.name} is a PNG, which is not yet supported.`);
+			const canvas = new OffscreenCanvas(1, 1);
+			canvas.getContext('2d');
+			return this.url[lightLevel] = new ResourceUrl(await canvas.convertToBlob());
+		}
 		const canvas = new OffscreenCanvas(width, height);
 		const patch = new Patch(this);
 		this.width  = width;
 		this.height = height;
-		canvas.getContext('2d').drawImage(patch.decode(), 0, 0);
-		return this.url = new ResourceUrl(await canvas.convertToBlob());
+		canvas.getContext('2d').drawImage(await patch.decode(lightLevel), 0, 0);
+		return this.url[lightLevel] = new ResourceUrl(await canvas.convertToBlob());
 	}
 }
 
@@ -521,14 +557,21 @@ class Texture
 		const canvas = new OffscreenCanvas(this.width, this.height);
 		const context = canvas.getContext('2d');
 
+		const loader = this.wad.loader || this.wad;
+
 		for(const patchRef of this.patches)
 		{
-			const patch = new Patch({wad:this.wad, ...this.wad.getEntryByName(patchRef.pname)});
-			const decoded = await createImageBitmap(patch.decode(lightLevel));
+			const patch = new Patch({wad:this.wad, ...loader.getEntryByName(patchRef.pname)});
+			if(!patch.name)
+			{
+				console.warn(`Missing patch ${patchRef.pname} for texture ${this.name}`);
+				continue;
+			}
+			const decoded = await createImageBitmap(await patch.decode(lightLevel));
 			context.drawImage(decoded, Math.max(0, patchRef.xOff), Math.max(0, patchRef.yOff));
 		}
 
-		const pixels  = context.getImageData(0, 0, canvas.width, canvas.height);
+		const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
 
 		for(let i = 3; i < pixels.data.length; i+= 4)
 		{
@@ -540,29 +583,6 @@ class Texture
 		}
 
 		return new ResourceUrl(await canvas.convertToBlob());
-	}
-}
-
-class Sprite
-{
-	constructor(frames)
-	{
-		this.frames = frames;
-	}
-
-	async decode(lightLevel)
-	{
-		frame: for(const f in this.frames)
-		angle: for(const a in this.frames[f])
-		{
-			const url = await _sprite[f][a].decode(lightLevel);
-			const texture = textureLoader.load(url);
-			texture.colorSpace = THREE.SRGBColorSpace;
-			sprite[f] = sprite[f] || [];
-			sprite[f][a] = texture;
-			texture.magFilter = THREE.NearestFilter;
-			texture.colorSpace = THREE.SRGBColorSpace;
-		}
 	}
 }
 
@@ -581,6 +601,24 @@ class WadMap
 			glssectIndex: {value: {}},
 			stitched: {value: new Map},
 		});
+
+		this.pos = Infinity;
+		let end = 0;
+
+		for(const lump of Object.values(this.lumps))
+		{
+			if(this.pos > lump.pos)
+			{
+				this.pos = lump.pos;
+			}
+
+			if(end < lump.pos + lump.size)
+			{
+				end = lump.pos + lump.size;
+			}
+		}
+
+		this.size = end - this.pos;
 
 		for(let i = 0; i < this.linedefCount; i++)
 		{
@@ -808,7 +846,11 @@ class WadMap
 			const right  = this.wad.view.getUint16(linedefStart + 5*SHORT, true);
 			const left   = this.wad.view.getUint16(linedefStart + 6*SHORT, true);
 
+			const actionMeta = actionTable[action] ? {index: action, ...actionTable[action]} : null;
+			if(actionMeta && actionMeta.sound) actionMeta.soundMeta = soundMapping[actionMeta.sound];
+
 			const linedef = {
+				index,
 				from,
 				to,
 				flags,
@@ -816,7 +858,7 @@ class WadMap
 				tag,
 				right,
 				left: left < 0xFFFF ? left : -1,
-				index,
+				actionMeta,
 			};
 
 			this.cache.linedef.set(index, linedef);
@@ -832,7 +874,7 @@ class WadMap
 			const to      = this.wad.view.getUint16(linedefStart + 1*SHORT, true);
 			const flags   = this.wad.view.getUint16(linedefStart + 2*SHORT, true);
 
-			const special =  this.wad.view.getUint8(linedefStart + 3*SHORT + 0*BYTE, true);
+			const action  =  this.wad.view.getUint8(linedefStart + 3*SHORT + 0*BYTE, true);
 			const arg1    =  this.wad.view.getUint8(linedefStart + 3*SHORT + 1*BYTE, true);
 			const arg2    =  this.wad.view.getUint8(linedefStart + 3*SHORT + 2*BYTE, true);
 			const arg3    =  this.wad.view.getUint8(linedefStart + 3*SHORT + 3*BYTE, true);
@@ -842,19 +884,22 @@ class WadMap
 			const right   = this.wad.view.getUint16(linedefStart + 3*SHORT + 6*BYTE + 0*SHORT, true);
 			const left    = this.wad.view.getUint16(linedefStart + 3*SHORT + 6*BYTE + 1*SHORT, true);
 
+			const actionMeta = actionTableHexen[action];
+
 			const linedef = {
+				index,
 				from,
 				to,
 				flags,
 				right,
 				left: left < 0xFFFF ? left : -1,
-				special,
+				action,
 				arg1,
 				arg2,
 				arg3,
 				arg4,
 				arg5,
-				index,
+				actionMeta
 			};
 
 			this.cache.linedef.set(index, linedef);
@@ -1659,8 +1704,55 @@ class WadMap
 		}
 	}
 
-	// GL_PVS
-	// WADCSRC
+	get hasPvs()
+	{
+		return !!(this.lumps.GL_PVS && this.lumps.GL_PVS.size);
+	}
+
+	glpvsIsVisible(from, to)
+	{
+		if(!this.lumps.GL_PVS)
+		{
+			console.warn('No GL_PVS node found.');
+			return false;
+		}
+
+		const entry = this.lumps.GL_PVS;
+		const rowSize = Math.ceil(this.glSubsectorCount / 8);
+		const offset = entry.pos + from * rowSize + (to >> 3);
+		return (this.wad.bytes[offset] & (1 << (to & 7))) !== 0;
+	}
+
+	glpvsVisibleFrom(from)
+	{
+		const sectors = new Set;
+
+
+		if(!this.lumps.GL_PVS)
+		{
+			console.warn('No GL_PVS node found.');
+			return sectors;
+		}
+
+		const visible = [];
+		const entry = this.lumps.GL_PVS;
+		const rowSize = Math.ceil(this.glSubsectorCount / 8);
+		const rowStart = entry.pos + from * rowSize;
+
+		for(let to = 0; to < this.glSubsectorCount; to++)
+		{
+			const byte = this.wad.bytes[rowStart + (to >> 3)];
+			if(byte & (1 << (to & 7))) visible.push(to);
+		}
+
+		for(const index of visible)
+		{
+			const ssect = this.glSubsector(index);
+			sectors.add(ssect.sector);
+		}
+
+		return sectors;
+	}
 
 	get bounds()
 	{
@@ -1766,8 +1858,14 @@ class WadMap
 		};
 	}
 
-	bspPoint(x, y)
+	bspPoint(x, y, getSubsect = false)
 	{
+		if(!this.bsp.length)
+		{
+			console.warn('No BSP tree for map ' + this.name)
+			return null;
+		}
+
 		const root = this.bsp[ this.bsp.length + -1 ];
 		let parent = root;
 
@@ -1783,6 +1881,7 @@ class WadMap
 				if(parent.left.subsector)
 				{
 					const subsector = this.glSubsector(parent.left.child);
+					if(getSubsect) return subsector;
 					const sector = this.sector(subsector.sector);
 					return sector;
 				}
@@ -1794,6 +1893,7 @@ class WadMap
 				if(parent.right.subsector)
 				{
 					const subsector = this.glSubsector(parent.right.child);
+					if(getSubsect) return subsector;
 					const sector = this.sector(subsector.sector);
 					return sector;
 				}
@@ -1801,6 +1901,50 @@ class WadMap
 				parent = this.bsp[ parent.right.child ];
 			}
 		}
+	}
+
+	splitMap(name)
+	{
+		const header = new Uint8Array(12);
+		const hLong  = new Uint32Array(header.buffer);
+
+		header.set(new TextEncoder().encode('PWAD'), 0);
+		const hlen = 12;
+		const directory = [];
+		const lumps = [];
+
+		let entries = [];
+		let written = 0;
+		for(const [name, entry] of Object.entries(this.lumps))
+		{
+			const entryBytes = new Uint8Array(16);
+			const eLong  = new Uint32Array(entryBytes.buffer);
+			eLong[0] = hlen + written;
+			eLong[1] = entry.size;
+			entryBytes.set(new TextEncoder().encode(entry.name), 8);
+			directory.push(entryBytes);
+			entries.push(entry.name);
+			lumps.push(this.wad.lump(entry.index));
+			written += entry.size;
+		}
+
+		hLong[1] = directory.length;
+		hLong[2] = hlen + written;
+
+		const getSize = (a,b) => a + b.length;
+		const size = header.length + lumps.reduce(getSize, 0) + directory.reduce(getSize, 0);
+		console.log({entries, size, header, directory, lumps});
+
+		const result = new Uint8Array(size);
+
+		written = 0;
+		for(const chunk of [header, ...lumps, ...directory])
+		{
+			result.set(chunk, written);
+			written += chunk.length;
+		}
+
+		return result;
 	}
 }
 
@@ -1821,7 +1965,7 @@ export class Wad
 		Object.defineProperty(this, 'flatAnim', {value: {}});
 		Object.defineProperty(this, 'pictures', {value: {}});
 		Object.defineProperty(this, 'sprites', {value: {}});
-		Object.defineProperty(this, 'sounds', {value: {}});
+		Object.defineProperty(this, 'samples', {value: {}});
 
 		for(let i = 0; i < this.lumpCount; i++)
 		{
@@ -1893,6 +2037,11 @@ export class Wad
 		return this.view.getUint32(4, true);
 	}
 
+	get lumpNames()
+	{
+		return Object.keys(this.entries);
+	}
+
 	getDirEntry(index)
 	{
 		const dirStart = this.view.getUint32(8, true);
@@ -1933,9 +2082,18 @@ export class Wad
 
 	findMaps()
 	{
-		const maps = [];
+		if(!this.cache.maps)
+		{
+			this.cache.maps = [];
+		}
+		else
+		{
+			return [...this.cache.maps];
+		}
 
-		for(let i = 1; i < this.lumpCount + -3; i++)
+		const maps = this.cache.maps;
+
+		for(let i = 0; i < this.lumpCount + -3; i++)
 		{
 			const entry = this.getDirEntry(i);
 
@@ -1954,7 +2112,27 @@ export class Wad
 			}
 		}
 
-		return maps;
+		return [...maps];
+	}
+
+	findNextMap(mapName)
+	{
+		const maps = this.findMaps();
+		const current = maps.indexOf(mapName);
+
+		if(current < 0)
+		{
+			console.warn(`Cant find next map, provided map ${mapName} not found.`);
+			return false;
+		}
+
+		if(current === maps.length - 1)
+		{
+			console.warn(`Cant find next map, provided map ${mapName} is the last map.`);
+			return false;
+		}
+
+		return maps[current + 1];
 	}
 
 	loadMap(mapName)
@@ -2147,8 +2325,6 @@ export class Wad
 				this.sprites[spriteName][frame][dir] = {picture: new Picture(entry), flipped : false};
 			}
 		}
-
-		console.log(this.sprites);
 	}
 
 	loadAnimations()
@@ -2265,6 +2441,40 @@ export class Wad
 
 		return new Picture(this.entries[name])
 	}
+
+	sample(name)
+	{
+		name = String(name).toUpperCase();
+
+		if(!this.cache.sample)
+		{
+			this.cache.sample = new Map;
+		}
+
+		if(this.cache.sample.has(name))
+		{
+			return this.cache.sample.get(name);
+		}
+
+		const entry = this.entries[name];
+
+		if(!entry)
+		{
+			return;
+		}
+
+		const format  = this.view.getInt16(entry.pos + 0*SHORT, true);
+		const rate    = this.view.getInt16(entry.pos + 1*SHORT, true);
+		const length  = this.view.getInt16(entry.pos + 2*SHORT, true);
+		const zero    = this.view.getInt16(entry.pos + 3*SHORT, true);
+		const samples = this.bytes.slice(entry.pos + 4*SHORT, entry.pos + 4*SHORT + length);
+
+		const sample =  {rate, length, samples, format, zero};
+
+		this.cache.sample.set(name, sample);
+
+		return sample;
+	}
 }
 
 export class WadLoader
@@ -2279,13 +2489,22 @@ export class WadLoader
 			console.warn(`Type of first .WAD is ${wads[0].type}, expected IWAD.`);
 		}
 
-		Object.freeze(this.wads);
 		Object.freeze(this);
+	}
+
+	addPWad(rawBytes)
+	{
+		this.wads.unshift(new Wad(rawBytes, this));
 	}
 
 	async hash()
 	{
 		return await Promise.all(this.wads.map(w => w.hash()));
+	}
+
+	get lumpNames()
+	{
+		return this.wads.map(wad => wad.lumpNames).flat();
 	}
 
 	getDirEntry(index)
@@ -2297,11 +2516,11 @@ export class WadLoader
 		}
 	}
 
-	getDirEntryByName(name)
+	getEntryByName(name)
 	{
 		for(const wad of this.wads)
 		{
-			const entry = wad.getDirEntryByName(name);
+			const entry = wad.getEntryByName(name);
 			if(entry) return entry;
 		}
 	}
@@ -2335,6 +2554,26 @@ export class WadLoader
 		}
 
 		return [...maps];
+	}
+
+	findNextMap(mapName)
+	{
+		const maps = this.findMaps();
+		const current = maps.indexOf(mapName);
+
+		if(current < 0)
+		{
+			console.warn(`Cant find next map, provided map ${mapName} not found.`);
+			return false;
+		}
+
+		if(current === maps.length - 1)
+		{
+			console.warn(`Cant find next map, provided map ${mapName} is the last map.`);
+			return false;
+		}
+
+		return maps[current + 1];
 	}
 
 	loadMap(mapName)
@@ -2399,6 +2638,15 @@ export class WadLoader
 			if(picture) return picture;
 		}
 	}
+
+	sample(name)
+	{
+		for(const wad of this.wads)
+		{
+			const sample = wad.sample(name);
+			if(sample) return sample;
+		}
+	}
 }
 
 const defaultAnimatedTextures = new Set([
@@ -2429,7 +2677,7 @@ const defaultAnimatedFlats = new Set([
 	'SLIME0',
 ]);
 
-const thingTable = {
+export const thingTable = {
 	0xffff: {sprite: '----' ,'seq': '-' ,    modifier: '',    comment: '(nothing)',},
 	0x0000: {sprite: '----' ,'seq': '-' ,    modifier: '',    comment: '(nothing)',},
 	0x0001: {sprite: 'PLAY', 'seq': '+' ,    modifier: '',    comment: 'Player 1 start (Player 1 start needed on ALL levels)',},
@@ -2555,4 +2803,201 @@ const thingTable = {
 	0x0015: {sprite: 'SARG', 'seq': 'n',     modifier: '',    comment: 'Dead demon',},
 	0x0016: {sprite: 'HEAD', 'seq': 'l',     modifier: '',    comment: 'Dead cacodemon',},
 	0x0017: {sprite: 'SKUL', 'seq': 'k',     modifier: '',    comment: 'Dead lost soul, invisible (they blow up when killed)',},
+};
+
+export const actionTable = {
+	// Local Doors
+	1:   {type: 'mDoor',  modifier: 'nSRm', sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open/close'},
+	26:  {type: 'mDoor',  modifier: 'nSR',  sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open/close BLUE KEY'},
+	28:  {type: 'mDoor',  modifier: 'nSR',  sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open/close RED KEY'},
+	27:  {type: 'mDoor',  modifier: 'nSR',  sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open/close YELLOW KEY'},
+	31:  {type: 'mDoor',  modifier: 'nS1',  sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'open'},
+	32:  {type: 'mDoor',  modifier: 'nS1',  sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'open BLUE KEY'},
+	33:  {type: 'mDoor',  modifier: 'nS1',  sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'open RED KEY'},
+	34:  {type: 'mDoor',  modifier: 'nS1',  sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'open YELLOW KEY'},
+	46:  {type: 'mDoor',  modifier: 'nGR',  sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'open'},
+	117: {type: 'mDoor',  modifier: 'nSR',  sound: 'BLAZE',  speed: 'turbo',   tm:   4,   chg: '-',   effect: 'open/close'},
+
+	// Remote Doors
+	4:   {type: 'rDoor',  modifier: 'W1',   sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open,close'},
+	29:  {type: 'rDoor',  modifier: 'S1',   sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open,close'},
+	90:  {type: 'rDoor',  modifier: 'WR',   sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open,close'},
+	63:  {type: 'rDoor',  modifier: 'SR',   sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open,close'},
+	2:   {type: 'rDoor',  modifier: 'W1',   sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'open'},
+	103: {type: 'rDoor',  modifier: 'S1',   sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'open'},
+	86:  {type: 'rDoor',  modifier: 'WR',   sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'open'},
+	61:  {type: 'rDoor',  modifier: 'SR',   sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'open'},
+	3:   {type: 'rDoor',  modifier: 'W1',   sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'close'},
+	50:  {type: 'rDoor',  modifier: 'S1',   sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'close'},
+	75:  {type: 'rDoor',  modifier: 'WR',   sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'close'},
+	42:  {type: 'rDoor',  modifier: 'SR',   sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'close'},
+	16:  {type: 'rDoor',  modifier: 'W1',   sound: 'DOOR',   speed: 'med',     tm:  30,   chg: '-',   effect: 'close, then opens'},
+	76:  {type: 'rDoor',  modifier: 'WR',   sound: 'DOOR',   speed: 'med',     tm:  30,   chg: '-',   effect: 'close, then opens'},
+	108: {type: 'rDoor',  modifier: 'W1',   sound: 'BLAZE',  speed: 'turbo',   tm:   4,   chg: '-',   effect: 'open,close'},
+	111: {type: 'rDoor',  modifier: 'WR',   sound: 'BLAZE',  speed: 'turbo',   tm:   4,   chg: '-',   effect: 'open,close'},
+	105: {type: 'rDoor',  modifier: 'S1',   sound: 'BLAZE',  speed: 'turbo',   tm:   4,   chg: '-',   effect: 'open,close'},
+	114: {type: 'rDoor',  modifier: 'SR',   sound: 'BLAZE',  speed: 'turbo',   tm:   4,   chg: '-',   effect: 'open,close'},
+	109: {type: 'rDoor',  modifier: 'W1',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'open'},
+	112: {type: 'rDoor',  modifier: 'S1',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'open'},
+	106: {type: 'rDoor',  modifier: 'WR',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'open'},
+	115: {type: 'rDoor',  modifier: 'SR',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'open'},
+	110: {type: 'rDoor',  modifier: 'W1',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'close'},
+	113: {type: 'rDoor',  modifier: 'S1',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'close'},
+	107: {type: 'rDoor',  modifier: 'WR',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'close'},
+	116: {type: 'rDoor',  modifier: 'SR',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'close'},
+	133: {type: 'rDoor',  modifier: 'S1',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'open BLUE KEY'},
+	99:  {type: 'rDoor',  modifier: 'SR',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'open BLUE KEY'},
+	135: {type: 'rDoor',  modifier: 'S1',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'open RED KEY'},
+	134: {type: 'rDoor',  modifier: 'SR',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'open RED KEY'},
+	137: {type: 'rDoor',  modifier: 'S1',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'open YELLOW KEY'},
+	136: {type: 'rDoor',  modifier: 'SR',   sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'open YELLOW KEY'},
+
+	// Ceilings
+	40:  {type: 'Ceil',   modifier: 'W1',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to HEC'},
+	41:  {type: 'Ceil',   modifier: 'S1',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to floor'},
+	43:  {type: 'Ceil',   modifier: 'SR',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to floor'},
+	44:  {type: 'Ceil',   modifier: 'W1',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to floor + 8'},
+	49:  {type: 'Ceil',   modifier: 'S1',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to floor + 8'},
+	72:  {type: 'Ceil',   modifier: 'WR',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to floor + 8'},
+
+	// Lifts
+	10:  {type: 'Lift',   modifier: 'W1',    sound: 'LIFT',   speed: 'fast',    tm:   3,   chg: '-',   effect: 'lift'},
+	21:  {type: 'Lift',   modifier: 'S1',    sound: 'LIFT',   speed: 'fast',    tm:   3,   chg: '-',   effect: 'lift'},
+	88:  {type: 'Lift',   modifier: 'WRm',   sound: 'LIFT',   speed: 'fast',    tm:   3,   chg: '-',   effect: 'lift'},
+	62:  {type: 'Lift',   modifier: 'SR',    sound: 'LIFT',   speed: 'fast',    tm:   3,   chg: '-',   effect: 'lift'},
+	121: {type: 'Lift',   modifier: 'W1',    sound: 'LIFT',   speed: 'turbo',   tm:   3,   chg: '-',   effect: 'lift'},
+	122: {type: 'Lift',   modifier: 'S1',    sound: 'LIFT',   speed: 'turbo',   tm:   3,   chg: '-',   effect: 'lift'},
+	120: {type: 'Lift',   modifier: 'WR',    sound: 'LIFT',   speed: 'turbo',   tm:   3,   chg: '-',   effect: 'lift'},
+	123: {type: 'Lift',   modifier: 'SR',    sound: 'LIFT',   speed: 'turbo',   tm:   3,   chg: '-',   effect: 'lift'},
+
+	// Floors
+	119: {type: 'Floor',  modifier: 'W1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to nhEF'},
+	128: {type: 'Floor',  modifier: 'WR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to nhEF'},
+	18:  {type: 'Floor',  modifier: 'S1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to nhEF'},
+	69:  {type: 'Floor',  modifier: 'SR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to nhEF'},
+	22:  {type: 'Floor',  modifier: 'W1&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'TX',  effect: 'up to nhEF'},
+	95:  {type: 'Floor',  modifier: 'WR&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'TX',  effect: 'up to nhEF'},
+	20:  {type: 'Floor',  modifier: 'S1&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'TX',  effect: 'up to nhEF'},
+	68:  {type: 'Floor',  modifier: 'SR&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'TX',  effect: 'up to nhEF'},
+	47:  {type: 'Floor',  modifier: 'G1&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'TX',  effect: 'up to nhEF'},
+	5:   {type: 'Floor',  modifier: 'W1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to LIC'},
+	91:  {type: 'Floor',  modifier: 'WR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to LIC'},
+	101: {type: 'Floor',  modifier: 'S1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to LIC'},
+	64:  {type: 'Floor',  modifier: 'SR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to LIC'},
+	24:  {type: 'Floor',  modifier: 'G1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to LIC'},
+	130: {type: 'Floor',  modifier: 'W1',    sound: 'MOVER',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'up to nhEF'},
+	131: {type: 'Floor',  modifier: 'S1',    sound: 'MOVER',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'up to nhEF'},
+	129: {type: 'Floor',  modifier: 'WR',    sound: 'MOVER',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'up to nhEF'},
+	132: {type: 'Floor',  modifier: 'SR',    sound: 'MOVER',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'up to nhEF'},
+	56:  {type: 'Floor',  modifier: 'W1&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to LIC - 8, CRUSH'},
+	94:  {type: 'Floor',  modifier: 'WR&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to LIC - 8, CRUSH'},
+	55:  {type: 'Floor',  modifier: 'S1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to LIC - 8, CRUSH'},
+	65:  {type: 'Floor',  modifier: 'SR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up to LIC - 8, CRUSH'},
+	58:  {type: 'Floor',  modifier: 'W1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up 24'},
+	92:  {type: 'Floor',  modifier: 'WR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up 24'},
+	15:  {type: 'Floor',  modifier: 'S1&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'TX',  effect: 'up 24'},
+	66:  {type: 'Floor',  modifier: 'SR&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'TX',  effect: 'up 24'},
+	59:  {type: 'Floor',  modifier: 'W1&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'TXP', effect: 'up 24'},
+	93:  {type: 'Floor',  modifier: 'WR&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'TXP', effect: 'up 24'},
+	14:  {type: 'Floor',  modifier: 'S1&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'TX',  effect: 'up 32'},
+	67:  {type: 'Floor',  modifier: 'SR&',   sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'TX',  effect: 'up 32'},
+	140: {type: 'Floor',  modifier: 'S1',    sound: 'MOVER',  speed: 'med',     tm:  -1,   chg: '-',   effect: 'up 512'},
+	30:  {type: 'Floor',  modifier: 'W1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up ShortestLowerTexture'},
+	96:  {type: 'Floor',  modifier: 'WR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'up ShortestLowerTexture'},
+	38:  {type: 'Floor',  modifier: 'W1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to LEF'},
+	23:  {type: 'Floor',  modifier: 'S1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to LEF'},
+	82:  {type: 'Floor',  modifier: 'WR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to LEF'},
+	60:  {type: 'Floor',  modifier: 'SR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to LEF'},
+	37:  {type: 'Floor',  modifier: 'W1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'NXP', effect: 'down to LEF'},
+	84:  {type: 'Floor',  modifier: 'WR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'NXP', effect: 'down to LEF'},
+	19:  {type: 'Floor',  modifier: 'W1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to HEF'},
+	102: {type: 'Floor',  modifier: 'S1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to HEF'},
+	83:  {type: 'Floor',  modifier: 'WR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to HEF'},
+	45:  {type: 'Floor',  modifier: 'SR',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'down to HEF'},
+	36:  {type: 'Floor',  modifier: 'W1',    sound: 'MOVER',  speed: 'fast',    tm:  -1,   chg: '-',   effect: 'down to HEF + 8'},
+	71:  {type: 'Floor',  modifier: 'S1',    sound: 'MOVER',  speed: 'fast',    tm:  -1,   chg: '-',   effect: 'down to HEF + 8'},
+	98:  {type: 'Floor',  modifier: 'WR',    sound: 'MOVER',  speed: 'fast',    tm:  -1,   chg: '-',   effect: 'down to HEF + 8'},
+	70:  {type: 'Floor',  modifier: 'SR',    sound: 'MOVER',  speed: 'fast',    tm:  -1,   chg: '-',   effect: 'down to HEF + 8'},
+	9:   {type: 'Floor',  modifier: 'S1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: 'NXP', effect: 'donut (see note 12 above)'},
+
+	// Stairs
+	8:   {type: 'Stair',  modifier: 'W1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'stairs'},
+	7:   {type: 'Stair',  modifier: 'S1',    sound: 'MOVER',  speed: 'slow',    tm:  -1,   chg: '-',   effect: 'stairs'},
+	100: {type: 'Stair',  modifier: 'W1',    sound: 'MOVER',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'stairs (each up 16 not 8) + crush'},
+	127: {type: 'Stair',  modifier: 'S1',    sound: 'MOVER',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'stairs (each up 16 not 8) + crush'},
+
+	// Moving Floors
+	53:  {type: 'MvFlr',  modifier: 'W1&',   sound: 'LIFT',   speed: 'slow',    tm:   3,   chg: '-',   effect: 'start moving floor'},
+	54:  {type: 'MvFlr',  modifier: 'W1&',   sound: '-' ,     speed: '-',       tm:  -1,   chg: '-',   effect: 'stop moving floor'},
+	87:  {type: 'MvFlr',  modifier: 'WR&',   sound: 'LIFT',   speed: 'slow',    tm:   3,   chg: '-',   effect: 'start moving floor'},
+	89:  {type: 'MvFlr',  modifier: 'WR&',   sound: '-' ,     speed: '-',       tm:  -1,   chg: '-',   effect: 'stop moving floor'},
+
+	// Crushing Ceilings
+	6:   {type: 'Crush',  modifier: 'W1&',   sound: 'CRUSH',  speed: 'med',     tm:   0,   chg: '-',   effect: 'start crushing, fast hurt'},
+	25:  {type: 'Crush',  modifier: 'W1&',   sound: 'CRUSH',  speed: 'med',     tm:   0,   chg: '-',   effect: 'start crushing, slow hurt'},
+	73:  {type: 'Crush',  modifier: 'WR&',   sound: 'CRUSH',  speed: 'slow',    tm:   0,   chg: '-',   effect: 'start crushing, slow hurt'},
+	77:  {type: 'Crush',  modifier: 'WR&',   sound: 'CRUSH',  speed: 'med',     tm:   0,   chg: '-',   effect: 'start crushing, fast hurt'},
+	57:  {type: 'Crush',  modifier: 'W1&',   sound: '-',      speed: '-',       tm:  -1,   chg: '-',   effect: 'stop crush'},
+	74:  {type: 'Crush',  modifier: 'WR&',   sound: '-',      speed: '-',       tm:  -1,   chg: '-',   effect: 'stop crush'},
+	141: {type: 'Crush',  modifier: 'W1&',   sound: 'none?',  speed: 'slow',    tm:   0,   chg: '-',   effect: 'start crushing, slow hurt "Silent"'},
+
+	// Exit Level
+	11:  {type: 'Exit',   modifier: 'nS-',   sound: 'CLUNK',  speed: '-',       tm:  -1,   chg: '-',   effect: 'End level, go to next level'},
+	51:  {type: 'Exit',   modifier: 'nS-',   sound: 'CLUNK',  speed: '-',       tm:  -1,   chg: '-',   effect: 'End level, go to secret level'},
+	52:  {type: 'Exit',   modifier: 'nW-',   sound: 'CLUNK',  speed: '-',       tm:  -1,   chg: '-',   effect: 'End level, go to next level'},
+	124: {type: 'Exit',   modifier: 'nW-',   sound: 'CLUNK',  speed: '-',       tm:  -1,   chg: '-',   effect: 'End level, go to secret level'},
+
+	// Teleport
+	39:  {type: 'Telpt',  modifier: 'W1m',   sound: 'TPORT',  speed: '-',       tm:  -1,   chg: '-',   effect: 'Teleport'},
+	97:  {type: 'Telpt',  modifier: 'WRm',   sound: 'TPORT',  speed: '-',       tm:  -1,   chg: '-',   effect: 'Teleport'},
+	125: {type: 'Telpt',  modifier: 'W1m',   sound: 'TPORT',  speed: '-',       tm:  -1,   chg: '-',   effect: 'Teleport monsters only'},
+	126: {type: 'Telpt',  modifier: 'WRm',   sound: 'TPORT',  speed: '-',       tm:  -1,   chg: '-',   effect: 'Teleport monsters only'},
+
+	// Light
+	35:   {type: 'Light', modifier: 'W1',   sound: '-',      speed: '-',       tm:  -1,   chg: '-',   effect: '0'},
+	104:  {type: 'Light', modifier: 'W1',   sound: '-',      speed: '-',       tm:  -1,   chg: '-',   effect: 'LE (light level)'},
+	12:   {type: 'Light', modifier: 'W1',   sound: '-',      speed: '-',       tm:  -1,   chg: '-',   effect: 'HE (light level)'},
+	13:   {type: 'Light', modifier: 'W1',   sound: '-',      speed: '-',       tm:  -1,   chg: '-',   effect: '255'},
+	79:   {type: 'Light', modifier: 'WR',   sound: '-',      speed: '-',       tm:  -1,   chg: '-',   effect: '0'},
+	80:   {type: 'Light', modifier: 'WR',   sound: '-',      speed: '-',       tm:  -1,   chg: '-',   effect: 'HE (light level)'},
+	81:   {type: 'Light', modifier: 'WR',   sound: '-',      speed: '-',       tm:  -1,   chg: '-',   effect: '255'},
+	17:   {type: 'Light', modifier: 'W1',   sound: '-',      speed: '-',       tm:  -1,   chg: '-',   effect: 'Light blinks (see [4-9-1] type 3)'},
+	138:  {type: 'Light', modifier: 'SR',   sound: 'CLUNK',  speed: '-',       tm:  -1,   chg: '-',   effect: '255'},
+	139:  {type: 'Light', modifier: 'SR',   sound: 'CLUNK',  speed: '-',       tm:  -1,   chg: '-',   effect: '0'},
+};
+
+export const actionTableHexen = {
+	11:  {type: 'mDoor',  modifier: 'WR',  sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open/close'},
+	12:  {type: 'mDoor',  modifier: 'SR',  sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open/close'},
+};
+
+export const soundMapping = {
+	DOOR:  {start: 'DOROPN', stop: null,    move: null,     startReturn: 'DORCLS', stopReturn: null},
+	BLAZE: {start: null,     stop: null,    move: null,     startReturn: null,     stopReturn: null},
+	MOVER: {start: null,     stop: 'PSTOP', move: 'STNMOV', startReturn: null,     stopReturn: null},
+	LIFT:  {start: 'PSTART', stop: 'PSTOP', move: null,     startReturn: null,     stopReturn: null},
+	CRUSH: {start: null,     stop: null,    move: null,     startReturn: null,     stopReturn: null},
+	CLUNK: {start: null,     stop: null,    move: null,     startReturn: null,     stopReturn: null},
+	TPORT: {start: null,     stop: null,    move: null,     startReturn: null,     stopReturn: null},
 }
+
+export const specialTable = {
+	0x00: {type: '-',      effect: 'Normal, no special characteristic.'},
+	0x01: {type: 'Light',  effect: 'random off'},
+	0x02: {type: 'Light',  effect: 'blink 0.5 second'},
+	0x03: {type: 'Light',  effect: 'blink 1.0 second'},
+	0x04: {type: 'Both',   effect: '-10/20% health AND light blink 0.5 second'},
+	0x05: {type: 'Damage', effect: '-5/10% health'},
+	0x07: {type: 'Damage', effect: '-2/5% health'},
+	0x08: {type: 'Light',  effect: 'oscillates'},
+	0x09: {type: 'Secret', effect: 'a player must stand in this sector to get credit for finding this secret. This is for the SECRETS ratio on inter-level screens.'},
+	0x0a: {type: 'DOOR',   effect: '30 seconds after level start, ceiling closes like a door.'},
+	0x0b: {type: 'End',    effect: '-10/20% health. If a player\'s health is lowered to less than 11% while standing here, then the level ends! Play proceeds to the next level. If it is a final level (levels 8 in DOOM 1, level 30 in DOOM 2), the game ends!'},
+	0x0c: {type: 'Light',  effect: 'blink 0.5 second, synchronized'},
+	0x0d: {type: 'Light',  effect: 'blink 1.0 second, synchronized'},
+	0x0e: {type: 'DOOR',   effect: '300 seconds after level start, ceiling opens like a door.'},
+	0x10: {type: 'Damage', effect: '-10/20% health'},
+	0x11: {type: 'Light',  effect: 'flickers on and off randomly'},
+	0x06: {type: '-',      effect: 'crushing ceiling'},
+	0x0f: {type: '-',      effect: 'ammo creator'},
+};

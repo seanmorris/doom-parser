@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
 import fs from 'node:fs';
-import { Wad, WadLoader } from './Wad.mjs';
+import { Wad, WadLoader } from '../Wad.mjs';
 
 const args = process.argv.slice(2);
 const [wadFile, mapName] = args;
+
 const wad = new WadLoader(
-	new Wad( fs.readFileSync(wadFile) )
+	fs.readFileSync(wadFile)
 );
 
 console.error(`${wad.type} ${wad.format} ${wadFile}`);
@@ -19,7 +20,6 @@ if(mapName)
 	{
 		console.error(map.name);
 		console.error(map.format);
-		console.error(map);
 
 		console.error({
 			thingCount: map.thingCount,
@@ -41,10 +41,8 @@ if(mapName)
 		});
 	}
 
-	console.log(`
-		<svg viewBox="${map.bounds.xMin} ${map.bounds.yMin} ${map.bounds.xMax - map.bounds.xMin} ${map.bounds.yMax - map.bounds.yMin}" xmlns="http://www.w3.org/2000/svg" style = "transform: scaleY(-1);">
-		<style>polygon { fill:transparent; transition:fill 1s ease-out; } polygon:hover { fill: red; transition:fill 0s; }</style>
-	`);
+	console.log(`<svg viewBox="${map.bounds.xMin} ${map.bounds.yMin} ${map.bounds.xMax - map.bounds.xMin} ${map.bounds.yMax - map.bounds.yMin}" xmlns="http://www.w3.org/2000/svg" style = "transform: scaleY(-1);">
+<style>polygon { fill:transparent; transition:fill 1s ease-out; } polygon:hover { fill: red; transition:fill 0s; }</style>`);
 
 	for(let i = 0; i < map.linedefCount; i++)
 	{
@@ -59,7 +57,7 @@ if(mapName)
 		const rSector = map.sector(right.sector);
 		const lSector = left && map.sector(left.sector);
 
-		console.log(`  <line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" style="stroke:black;stroke-width:1;" />`);
+		console.log(`<line x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" style="stroke:black;stroke-width:1;" />`);
 	}
 
 	let k = 0;
@@ -70,7 +68,7 @@ if(mapName)
 		const vertexes = glSubsector.vertexes();
 		const bounds = glSubsector.bounds;
 		const verts = vertexes.map(v => `${v.x},${v.y}`).join(' ');
-		console.log(`  <polygon data-glssect = "${glSubsector.index}" points="${verts}" style = "stroke:#800000;stroke-width:1;" />`);
+		console.log(`<polygon data-glssect = "${glSubsector.index}" points="${verts}" style = "stroke:#800000;stroke-width:1;" />`);
 	}
 
 	console.log(`</svg>`);
