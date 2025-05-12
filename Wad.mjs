@@ -20,6 +20,7 @@ const MAP_LUMPS = Object.freeze([
 	, 'SECTORS'
 	, 'REJECT'   //*
 	, 'BLOCKMAP' //*
+	, 'BLOCKMP' //*
 	, 'BEHAVIOR' //*
 	, 'SCRIPTS'  //*
 	// , 'GL_[MAP]'
@@ -62,7 +63,10 @@ const nearestPointOnLine = (px, py, x1, y1, x2, y2) => {
 	return {x, y};
 };
 
-const UrlRegistry = new FinalizationRegistry(url => URL.revokeObjectURL(url));
+const UrlRegistry = new FinalizationRegistry(url => {
+	console.warn('Revoking ' + this.url);
+	URL.revokeObjectURL(url)
+});
 
 class ResourceUrl
 {
@@ -326,8 +330,10 @@ class Flat
 			return this.urls[lightLevel];
 		}
 
-		const colorMap = this.wad.getLumpByName('COLORMAP');
-		const playPal  = this.wad.getLumpByName('PLAYPAL');
+		const loader   = this.wad.loader || this.wad;
+
+		const colorMap = loader.getLumpByName('COLORMAP');
+		const playPal  = loader.getLumpByName('PLAYPAL');
 
 		const canvas  = new OffscreenCanvas(64, 64);
 		const context = canvas.getContext('2d');
@@ -337,16 +343,27 @@ class Flat
 
 		for(let i = 0; i < data.length; i++)
 		{
-			const o = data[i];
-			const c = colorMap[o + lightLevel * 0x100];
 			const x = i % 64;
 			const y = Math.trunc(i / 64);
 			const p = (x + (63-y) * 64) * 4;
+			const o = data[i];
 
-			pixels.data[p + 0] = playPal[3 * c + 0];
-			pixels.data[p + 1] = playPal[3 * c + 1];
-			pixels.data[p + 2] = playPal[3 * c + 2];
-			pixels.data[p + 3] = 255;
+			if(lightLevel > -1)
+			{
+				const c = colorMap[o + lightLevel * 0x100];
+
+				pixels.data[p + 0] = playPal[3 * c + 0];
+				pixels.data[p + 1] = playPal[3 * c + 1];
+				pixels.data[p + 2] = playPal[3 * c + 2];
+				pixels.data[p + 3] = 0xFF;
+			}
+			else
+			{
+				pixels.data[p + 0] = 0xFF - o;
+				pixels.data[p + 1] = 0;
+				pixels.data[p + 2] = 0;
+				pixels.data[p + 3] = 0xFF;
+			}
 		}
 
 		context.putImageData(pixels, 0, 0);
@@ -393,7 +410,7 @@ class Patch
 			return this.decoded = canvas;
 		}
 
-		const loader = this.wad.loader || this.wad;
+		const loader   = this.wad.loader || this.wad;
 
 		const colorMap = loader.getLumpByName('COLORMAP');
 		const playPal  = loader.getLumpByName('PLAYPAL');
@@ -408,7 +425,7 @@ class Patch
 
 		if(width === 0x5089 && height == 0x474E)
 		{
-			console.warn(`Patch lump ${this.name} is a PNG, which is not yet supported.`);
+			// console.warn(`Patch lump ${this.name} is a PNG, which is not yet supported.`);
 			const blob = new Blob([this.wad.slice(this.pos, this.pos + this.length)], {'type': 'image/png'});
 			const url  = new ResourceUrl(blob);
 			const img  = new Image;
@@ -445,14 +462,24 @@ class Patch
 				const x = column;
 				const y = post.row + Number(j);
 				const p = 4 * (x + y * width);
-
 				const o = post.pixels[j];
-				const c = colorMap[o + lightLevel * 0x100];
 
-				decoded.data[p + 0] = playPal[3 * c + 0];
-				decoded.data[p + 1] = playPal[3 * c + 1];
-				decoded.data[p + 2] = playPal[3 * c + 2];
-				decoded.data[p + 3] = 0xFF;
+				if(lightLevel > -1)
+				{
+					const c = colorMap[o + lightLevel * 0x100];
+
+					decoded.data[p + 0] = playPal[3 * c + 0];
+					decoded.data[p + 1] = playPal[3 * c + 1];
+					decoded.data[p + 2] = playPal[3 * c + 2];
+					decoded.data[p + 3] = 0xFF;
+				}
+				else
+				{
+					decoded.data[p + 0] = 0xFF - o;
+					decoded.data[p + 1] = 0;
+					decoded.data[p + 2] = 0;
+					decoded.data[p + 3] = 0xFF;
+				}
 			}
 
 			i += post.length;
@@ -585,6 +612,12 @@ class Texture
 		return new ResourceUrl(await canvas.convertToBlob());
 	}
 }
+
+const cleanupName = name => {
+	const chop = name.indexOf('\u0000');
+	if(chop > -1) return name.substr(0, chop);
+	return name;
+};
 
 class WadMap
 {
@@ -929,9 +962,9 @@ class WadMap
 
 		const xOffset = this.wad.view.getUint16(sidedefStart + 0*SHORT, true);
 		const yOffset = this.wad.view.getUint16(sidedefStart + 1*SHORT, true);
-		const upper   = decodeText(this.wad.bytes.slice(sidedefStart + 2*SHORT, sidedefStart + 2*SHORT + 8*CHAR));
-		const lower   = decodeText(this.wad.bytes.slice(sidedefStart + 2*SHORT + 1*8*CHAR, sidedefStart + 2*SHORT + 2*8*CHAR));
-		const middle  = decodeText(this.wad.bytes.slice(sidedefStart + 2*SHORT + 2*8*CHAR, sidedefStart + 2*SHORT + 3*8*CHAR));
+		const upper   = cleanupName(decodeText(this.wad.bytes.slice(sidedefStart + 2*SHORT, sidedefStart + 2*SHORT + 8*CHAR)));
+		const lower   = cleanupName(decodeText(this.wad.bytes.slice(sidedefStart + 2*SHORT + 1*8*CHAR, sidedefStart + 2*SHORT + 2*8*CHAR)));
+		const middle  = cleanupName(decodeText(this.wad.bytes.slice(sidedefStart + 2*SHORT + 2*8*CHAR, sidedefStart + 2*SHORT + 3*8*CHAR)));
 		const sector  = this.wad.view.getUint16(sidedefStart + 2*SHORT + 3*8*CHAR, true);
 
 		const sidedef = {xOffset, yOffset, upper, lower, middle, sector, index};
@@ -1115,8 +1148,8 @@ class WadMap
 
 		const floorHeight   = this.wad.view.getInt16(sectorStart + 0*SHORT, true);
 		const ceilingHeight = this.wad.view.getInt16(sectorStart + 1*SHORT, true);
-		const floorFlat     = decodeText(this.wad.bytes.slice(sectorStart + 2*SHORT + 0*8*CHAR, sectorStart + 2*SHORT + 1*8*CHAR));
-		const ceilingFlat   = decodeText(this.wad.bytes.slice(sectorStart + 2*SHORT + 1*8*CHAR, sectorStart + 2*SHORT + 2*8*CHAR));
+		const floorFlat     = cleanupName(decodeText(this.wad.bytes.slice(sectorStart + 2*SHORT + 0*8*CHAR, sectorStart + 2*SHORT + 1*8*CHAR)));
+		const ceilingFlat   = cleanupName(decodeText(this.wad.bytes.slice(sectorStart + 2*SHORT + 1*8*CHAR, sectorStart + 2*SHORT + 2*8*CHAR)));
 		const lightLevel    = this.wad.view.getUint16(sectorStart + 2*SHORT + 2*8*CHAR + 0*SHORT, true);
 		const special       = this.wad.view.getUint16(sectorStart + 2*SHORT + 2*8*CHAR + 1*SHORT, true);
 		const tag           = this.wad.view.getUint16(sectorStart + 2*SHORT + 2*8*CHAR + 2*SHORT, true);
@@ -1140,7 +1173,7 @@ class WadMap
 
 	get blockmapOrigin()
 	{
-		const entry = this.lumps.BLOCKMAP;
+		const entry = this.lumps.BLOCKMAP || this.lumps.BLOCKMP;
 		const x = this.wad.view.getInt16(entry.pos + 0*SHORT, true);
 		const y = this.wad.view.getInt16(entry.pos + 1*SHORT, true);
 
@@ -1149,7 +1182,7 @@ class WadMap
 
 	get blockCount()
 	{
-		const entry = this.lumps.BLOCKMAP;
+		const entry = this.lumps.BLOCKMAP || this.lumps.BLOCKMP;
 		const cols  = this.wad.view.getUint16(entry.pos + 2*SHORT, true);
 		const rows  = this.wad.view.getUint16(entry.pos + 3*SHORT, true);
 
@@ -1158,7 +1191,7 @@ class WadMap
 
 	block(index)
 	{
-		const entry = this.lumps.BLOCKMAP;
+		const entry = this.lumps.BLOCKMAP || this.lumps.BLOCKMP;
 		const start = this.wad.view.getUint16(entry.pos + 4*SHORT + index*SHORT, true);
 		const linedefs = [];
 
@@ -1184,7 +1217,7 @@ class WadMap
 
 	blockForPoint(x, y)
 	{
-		const entry = this.lumps.BLOCKMAP;
+		const entry = this.lumps.BLOCKMAP || this.lumps.BLOCKMP;
 
 		const xOrigin =  this.wad.view.getInt16(entry.pos + 0*SHORT, true);
 		const yOrigin =  this.wad.view.getInt16(entry.pos + 1*SHORT, true);
@@ -1933,7 +1966,7 @@ class WadMap
 
 		const getSize = (a,b) => a + b.length;
 		const size = header.length + lumps.reduce(getSize, 0) + directory.reduce(getSize, 0);
-		console.log({entries, size, header, directory, lumps});
+		// console.log({entries, size, header, directory, lumps});
 
 		const result = new Uint8Array(size);
 
@@ -1952,26 +1985,31 @@ export class Wad
 {
 	constructor(byteArray, loader = null)
 	{
-		Object.defineProperty(this, 'bytes', {value: new Uint8Array(byteArray)});
-		Object.defineProperty(this, 'view', {value: new DataView(this.bytes.buffer)});
-		Object.defineProperty(this, 'loader', {value: loader});
-		Object.defineProperty(this, 'cache', {value: {}});
-		Object.defineProperty(this, 'entries', {value: {}});
-		Object.defineProperty(this, 'lumps', {value: {}});
-		Object.defineProperty(this, 'patches', {value: {}});
+		Object.defineProperty(this, 'bytes',    {value: new Uint8Array(byteArray)});
+		Object.defineProperty(this, 'view',     {value: new DataView(this.bytes.buffer)});
+		Object.defineProperty(this, 'loader',   {value: loader});
+		Object.defineProperty(this, 'cache',    {value: {}});
+		Object.defineProperty(this, 'entries',  {value: {}});
+		Object.defineProperty(this, 'lumps',    {value: {}});
+		Object.defineProperty(this, 'patches',  {value: {}});
 		Object.defineProperty(this, 'textures', {value: {}});
-		Object.defineProperty(this, 'flats', {value: {}});
-		Object.defineProperty(this, 'texAnim', {value: {}});
+		Object.defineProperty(this, 'flats',    {value: {}});
+		Object.defineProperty(this, 'texAnim',  {value: {}});
 		Object.defineProperty(this, 'flatAnim', {value: {}});
 		Object.defineProperty(this, 'pictures', {value: {}});
-		Object.defineProperty(this, 'sprites', {value: {}});
-		Object.defineProperty(this, 'samples', {value: {}});
+		Object.defineProperty(this, 'sprites',  {value: {}});
+		Object.defineProperty(this, 'samples',  {value: {}});
 
 		for(let i = 0; i < this.lumpCount; i++)
 		{
 			const entry = this.getDirEntry(i);
 			const existing = this.entries[entry.name];
-			if(existing && !MAP_LUMPS.includes(entry.name)) console.warn(`Lump index ${i} "${entry.name}" is double defined (${existing.index}).`);
+
+			if(existing && !MAP_LUMPS.includes(entry.name))
+			{
+				console.warn(`Lump index ${i} "${entry.name}" is double defined (${existing.index}).`);
+			}
+
 			this.entries[entry.name] = entry;
 			this.lumps[entry.name] = this.lump(i);
 		}
@@ -2052,7 +2090,7 @@ export class Wad
 
 		const nameStart = entryStart + 8;
 
-		const name = decodeText(this.bytes.slice(nameStart, nameStart + 8));
+		const name = cleanupName(decodeText(this.bytes.slice(nameStart, nameStart + 8)));
 
 		return {wad: this, index, pos, size, name};
 	}
@@ -2168,11 +2206,11 @@ export class Wad
 			const entry = this.getDirEntry(i);
 			// const lump = this.lump(i);
 
-			if(entry.name === 'P_START')
+			if(entry.name === 'P_START' || entry.name === 'PP_START')
 			{
 				started = true;
 			}
-			else if(entry.name === 'P_END')
+			else if(entry.name === 'P_END' || entry.name === 'PP_END')
 			{
 				started = false;
 			}
@@ -2198,7 +2236,7 @@ export class Wad
 		for(let i = 0; i < count; i++)
 		{
 			const nameStart = pnameEntry.pos + 1*INT + i*8*BYTE;
-			pnames.push( decodeText(this.bytes.slice(nameStart, nameStart + 8*BYTE)).toUpperCase() );
+			pnames.push( cleanupName(decodeText(this.bytes.slice(nameStart, nameStart + 8*BYTE)).toUpperCase()) );
 		}
 
 		const texture1 = this.getEntryByName('TEXTURE1');
@@ -2246,11 +2284,11 @@ export class Wad
 		{
 			const entry = this.getDirEntry(i);
 
-			if(entry.name === 'F_START')
+			if(entry.name === 'F_START' || entry.name === 'FF_START')
 			{
 				started = true;
 			}
-			else if(entry.name === 'F_END')
+			else if(entry.name === 'F_END' || entry.name === 'FF_END')
 			{
 				started = false;
 			}
@@ -2269,11 +2307,11 @@ export class Wad
 		{
 			const entry = this.getDirEntry(i);
 
-			if(entry.name === 'S_START')
+			if(entry.name === 'S_START' || entry.name === 'SS_START')
 			{
 				started = true;
 			}
-			else if(entry.name === 'S_END')
+			else if(entry.name === 'S_END' || entry.name === 'SS_END')
 			{
 				break;
 			}
@@ -2817,6 +2855,9 @@ export const actionTable = {
 	34:  {type: 'mDoor',  modifier: 'nS1',  sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'open YELLOW KEY'},
 	46:  {type: 'mDoor',  modifier: 'nGR',  sound: 'DOOR',   speed: 'med',     tm:  -1,   chg: '-',   effect: 'open'},
 	117: {type: 'mDoor',  modifier: 'nSR',  sound: 'BLAZE',  speed: 'turbo',   tm:   4,   chg: '-',   effect: 'open/close'},
+	118: {type: 'mDoor',  modifier: 'nSR',  sound: 'BLAZE',  speed: 'turbo',   tm:  -1,   chg: '-',   effect: 'open/close'},
+	175: {type: 'mDoor',  modifier: 'nSR',  sound: 'BLAZE',  speed: 'slow',    tm:  30,   chg: '-',   effect: 'open/close'},
+	196: {type: 'mDoor',  modifier: 'nSR',  sound: 'BLAZE',  speed: 'slow',    tm:  30,   chg: '-',   effect: 'open/close'},
 
 	// Remote Doors
 	4:   {type: 'rDoor',  modifier: 'W1',   sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open,close'},
@@ -2969,6 +3010,7 @@ export const actionTable = {
 export const actionTableHexen = {
 	11:  {type: 'mDoor',  modifier: 'WR',  sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open/close'},
 	12:  {type: 'mDoor',  modifier: 'SR',  sound: 'DOOR',   speed: 'med',     tm:   4,   chg: '-',   effect: 'open/close'},
+	181: {type: 'Slope',  modifier: '-',   sound: '-',      speed: '-',       tm:   0,   chg: '-',   effect: 'Slope'},
 };
 
 export const soundMapping = {

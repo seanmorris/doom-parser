@@ -6,7 +6,7 @@ import { Wad, WadLoader } from '../Wad.mjs';
 const args = process.argv.slice(2);
 const [wadFile, mapName] = args;
 
-const wad = new WadLoader(
+const wad = new Wad(
 	fs.readFileSync(wadFile)
 );
 
@@ -78,6 +78,6 @@ else
 	for(let i = 0; i < wad.lumpCount; i++)
 	{
 		const entry = wad.getDirEntry(i);
-		console.log( entry );
+		console.log( entry.name );
 	}
 }
